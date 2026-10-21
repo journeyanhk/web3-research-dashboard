@@ -10,6 +10,8 @@ const { identityStatus } = require('../lib/identity')
 const { runDiscovery, isRunning, CORE_CHAINS } = require('../lib/collect/discovery')
 
 const router = Router()
+// 所有接口需要登录（见 lib/auth.js）
+router.use(require('../lib/auth').requireAuth)
 const wrap = (fn) => (req, res) => fn(req, res).catch((e) => {
   console.error('[radar]', e.message)
   res.status(500).json({ error: e.message })
@@ -127,7 +129,7 @@ router.get('/quality', wrap(async (_req, res) => {
     `SELECT provider, count(*)::int AS calls, count(*) FILTER (WHERE status='error')::int AS errors
      FROM wr_api_usage WHERE created_at >= now() - interval '7 days' AND status <> 'cached' GROUP BY 1`)
   const runs = await db.query(
-    `SELECT id, trigger, status, started_at, finished_at, stats->>'surf_credits' AS credits
+    `SELECT id, trigger, status, started_at, finished_at, stats->>'surf_credits' AS credits, instance, stats->>'note' AS note
      FROM wr_job_runs WHERE job = 'discovery' ORDER BY id DESC LIMIT 10`)
   // 每 100 点产出的初筛项目：近 7 天新发现、目前处于初筛及之后阶段（不含淘汰）的项目数 / 近 7 天采集点数 × 100
   const screened = await db.one(

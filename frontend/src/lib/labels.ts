@@ -40,3 +40,10 @@ export const chainText = (chains?: string[] | null) => {
   const other = list.filter((c) => !CHAIN_LABEL[c])
   return [...core, ...(other.length ? [`+${other.length} 其他`] : [])].join(' · ')
 }
+
+export const FRESHNESS_LABEL: Record<string, { text: string; cls: string; tip: string }> = {
+  fresh: { text: '新鲜', cls: 'text-fg-base', tip: '最近 7 天内有事件、详情或指标更新' },
+  stale: { text: '需要刷新', cls: 'text-[var(--color-tag-yellow-100)]', tip: '最近一次更新在 7–30 天前' },
+  expired: { text: '过期', cls: 'text-[var(--color-tag-orange-100)]', tip: '超过 30 天没有任何更新' },
+  conflict: { text: '数据冲突', cls: 'text-destructive', tip: '存在待处理的身份冲突' },
+}

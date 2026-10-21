@@ -78,4 +78,27 @@ async function tx(fn) {
   }
 }
 
-module.exports = { query, one, ready, tx }
+// 租约锁（基于表，单条原子语句）：拿到返回 { release }，被占用返回 null（不等待）。
+// 不用 pg advisory lock：Neon 的连接池（-pooler，事务级复用）下会话锁不可靠。
+// 租约到期自动失效，进程崩溃也不会永久卡住。
+async function lock(name, ttlSec = 1800) {
+  await ready()
+  const holder = require('node:crypto').randomUUID()
+  const r = await getPool().query(
+    `INSERT INTO wr_registry (kind, key, value, updated_at)
+     VALUES ('lock', $1, jsonb_build_object('holder', $2::text, 'expires_at', now() + ($3 || ' seconds')::interval), now())
+     ON CONFLICT (kind, key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+       WHERE (wr_registry.value->>'expires_at')::timestamptz < now()
+     RETURNING key`,
+    [String(name), holder, String(ttlSec)],
+  )
+  if (!r.rows.length) return null
+  return {
+    holder,
+    release: async () => {
+      await getPool().query(`DELETE FROM wr_registry WHERE kind = 'lock' AND key = $1 AND value->>'holder' = $2`, [String(name), holder])
+    },
+  }
+}
+
+module.exports = { query, one, ready, tx, lock }

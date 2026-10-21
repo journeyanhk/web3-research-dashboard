@@ -3,6 +3,9 @@ import SystemPage from './pages/SystemPage'
 import RadarPage from './pages/RadarPage'
 import ProjectsPage from './pages/ProjectsPage'
 import ProjectDetailPage from './pages/ProjectDetailPage'
+import LoginPage from './pages/LoginPage'
+import { getToken, clearToken, AUTH_EVENT } from './lib/auth'
+import { getJson } from './lib/fetcher'
 
 type PageKey = 'radar' | 'projects' | 'tge' | 'workbench' | 'alerts' | 'system'
 
@@ -27,7 +30,20 @@ function readHash(): Route {
 
 export default function App() {
   const [route, setRoute] = useState<Route>({ page: 'radar' })
+  const [authed, setAuthed] = useState<'checking' | 'yes' | 'no'>('checking')
   const page = route.page
+
+  // 登录状态：有令牌就向后端确认一次；任何接口返回 401 都回到登录页
+  useEffect(() => {
+    const check = () => {
+      if (!getToken()) { setAuthed('no'); return }
+      getJson('auth/me').then(() => setAuthed('yes')).catch(() => setAuthed('no'))
+    }
+    check()
+    const onRequired = () => setAuthed('no')
+    window.addEventListener(AUTH_EVENT, onRequired)
+    return () => window.removeEventListener(AUTH_EVENT, onRequired)
+  }, [])
 
   useEffect(() => {
     setRoute(readHash())
@@ -37,6 +53,9 @@ export default function App() {
   }, [])
 
   const current = NAV.find((n) => n.key === page)!
+
+  if (authed === 'checking') return <div className="min-h-screen bg-background" />
+  if (authed === 'no') return <LoginPage onLogin={() => setAuthed('yes')} />
 
   return (
     <div className="min-h-screen bg-background text-foreground flex">
@@ -64,6 +83,12 @@ export default function App() {
         </nav>
         <div className="mt-auto px-5 py-4 text-[11px] text-fg-muted leading-5">
           链：ETH · BSC · Base · Arbitrum · SOL · Robinhood
+          <button
+            onClick={() => { clearToken(); setAuthed('no') }}
+            className="block mt-2 text-fg-subtle hover:text-fg-base"
+          >
+            退出登录
+          </button>
         </div>
       </aside>
       <main className="flex-1 min-w-0">

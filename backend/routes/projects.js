@@ -3,8 +3,11 @@ const { Router } = require('express')
 const db = require('../lib/db')
 const { decideRelation } = require('../lib/identity')
 const pipeline = require('../lib/pipeline')
+const { listProjects, FRESHNESS_SQL } = require('../lib/projectQuery')
 
 const router = Router()
+// 所有接口需要登录（见 lib/auth.js）
+router.use(require('../lib/auth').requireAuth)
 const wrap = (fn) => (req, res) => fn(req, res).catch((e) => {
   console.error('[projects]', e.message)
   res.status(500).json({ error: e.message })
@@ -85,51 +88,15 @@ router.post('/events/:id/link', wrap(async (req, res) => {
 
 // ───────── 项目池（M2）─────────
 
-const SORTS = {
-  first_seen: 'p.first_seen_at DESC',
-  last_event: 'p.last_event_at DESC NULLS LAST',
-  completeness: 'p.completeness DESC NULLS LAST, p.first_seen_at DESC',
-  credits: 'p.credits_spent DESC, p.first_seen_at DESC',
-  stage_changed: 'p.stage_changed_at DESC NULLS LAST',
-}
-
 router.get('/meta', wrap(async (_req, res) => {
   res.json({ stages: pipeline.STAGES, completeness: pipeline.COMPLETENESS_ITEMS })
 }))
 
 router.get('/', wrap(async (req, res) => {
-  const where = ['p.merged_into IS NULL']
-  const params = []
-  const add = (sql, v) => { params.push(v); where.push(sql.replace('?', `$${params.length}`)) }
-  const { chain, stage, source, identity, signal, q, chain_priority: chainPriority } = req.query
-  if (chain) add('p.chains ? ?', String(chain))
-  if (chainPriority) add('p.chain_priority = ?', String(chainPriority))
-  if (source) add('p.source_types ? ?', String(source))
-  if (identity) add('p.identity_status = ?', String(identity))
-  if (signal) add('p.signal_label = ?', String(signal))
-  if (q) add(`(p.name ILIKE ? OR p.symbol ILIKE $${params.length + 1} OR p.website_domain ILIKE $${params.length + 1} OR p.twitter_handle ILIKE $${params.length + 1})`, `%${String(q).trim()}%`)
-  const baseWhere = where.join(' AND ')
-  // 阶段计数（不受 stage 筛选影响，用作漏斗页签）
-  const stageCounts = await db.query(`SELECT p.stage, count(*)::int c FROM wr_projects p WHERE ${baseWhere} GROUP BY 1`, params)
-  if (stage) add('p.stage = ?', String(stage))
-  const finalWhere = where.join(' AND ')
-  const total = await db.one(`SELECT count(*)::int c FROM wr_projects p WHERE ${finalWhere}`, params)
-  const limit = Math.min(Number(req.query.limit) || 50, 200)
-  const offset = Math.max(Number(req.query.offset) || 0, 0)
-  const order = SORTS[req.query.sort] || SORTS.first_seen
-  const rows = await db.query(
-    `SELECT p.id, p.name, p.symbol, p.chains, p.chain_priority, p.stage, p.stage_source, p.stage_reason, p.stage_changed_at,
-            p.identity_status, p.source_types, p.signal_label, p.completeness::float AS completeness, p.tge_status,
-            p.credits_spent::float AS credits_spent, p.first_seen_at, p.last_event_at, p.website_domain, p.twitter_handle,
-            p.discovery_source, p.review_status,
-            (SELECT count(*)::int FROM wr_events e WHERE e.project_id = p.id) AS event_count,
-            (SELECT count(*)::int FROM wr_notes n WHERE n.project_id = p.id) AS note_count
-     FROM wr_projects p WHERE ${finalWhere} ORDER BY ${order} LIMIT ${limit} OFFSET ${offset}`,
-    params,
-  )
+  const result = await listProjects(req.query)
   const signals = await db.query(
     `SELECT signal_label, count(*)::int c FROM wr_projects WHERE merged_into IS NULL AND signal_label IS NOT NULL GROUP BY 1 ORDER BY 2 DESC`)
-  res.json({ data: rows, total: total.c, limit, offset, stage_counts: Object.fromEntries(stageCounts.map((r) => [r.stage, r.c])), signals })
+  res.json({ ...result, signals })
 }))
 
 router.post('/evaluate', wrap(async (_req, res) => {
@@ -138,7 +105,11 @@ router.post('/evaluate', wrap(async (_req, res) => {
 
 router.get('/:id(\\d+)', wrap(async (req, res) => {
   const id = Number(req.params.id)
-  let p = await db.one('SELECT * FROM wr_projects WHERE id = $1', [id])
+  const p = await db.one(
+    `SELECT p.*, lm.last_metric_at, p.detail_fetched_at AS last_detail_at, ${FRESHNESS_SQL} AS freshness
+     FROM wr_projects p
+     LEFT JOIN LATERAL (SELECT max(fetched_at) AS last_metric_at FROM wr_metrics m WHERE m.project_id = p.id) lm ON true
+     WHERE p.id = $1`, [id])
   if (!p) return res.status(404).json({ error: '项目不存在' })
   if (p.merged_into) return res.json({ redirect: p.merged_into })
   const [identifiers, events, metrics, credits, relations, history, notes, ambiguous] = await Promise.all([
@@ -162,7 +133,7 @@ router.get('/:id(\\d+)', wrap(async (req, res) => {
        FROM wr_project_relations r
        JOIN wr_projects o ON o.id = CASE WHEN r.project_a = $1 THEN r.project_b ELSE r.project_a END
        WHERE r.project_a = $1 OR r.project_b = $1 ORDER BY r.created_at DESC`, [id]),
-    db.query('SELECT id, from_stage, to_stage, source, reason, created_at FROM wr_stage_history WHERE project_id = $1 ORDER BY created_at DESC LIMIT 50', [id]),
+    db.query('SELECT id, from_stage, to_stage, source, reason, operator, rule_version, created_at FROM wr_stage_history WHERE project_id = $1 ORDER BY created_at DESC LIMIT 50', [id]),
     db.query('SELECT id, body, created_at, updated_at FROM wr_notes WHERE project_id = $1 ORDER BY created_at DESC', [id]),
     db.query(
       `SELECT id, event_type, title, event_at FROM wr_events

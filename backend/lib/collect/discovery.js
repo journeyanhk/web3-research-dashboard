@@ -474,12 +474,38 @@ async function refreshChainPriority() {
 }
 
 let running = null
+const LOCK_KEY = 'discovery' // 租约锁：同一时间全局只允许一个采集任务（预览环境与发布环境共用数据库）
 
-async function runDiscovery({ trigger = 'auto' } = {}) {
-  if (running) return { skipped: true, reason: '已有采集任务在运行' }
+// 实例标识：区分是预览环境还是发布环境跑的
+const instanceName = () => process.env.WR_INSTANCE || require('node:os').hostname() || 'unknown'
+
+// dryRun：只走锁与「当天是否已采集」检查，通过后直接返回，不发起任何请求（供自检使用）
+async function runDiscovery({ trigger = 'auto', dryRun = false } = {}) {
+  if (running) return { skipped: true, reason: '本进程已有采集任务在运行' }
   running = (async () => {
+    const lock = await db.lock(LOCK_KEY, 1800)
+    if (!lock) return { skipped: true, reason: '其他环境正在采集（数据库锁被占用）' }
+    try {
+      if (trigger === 'auto') {
+        const done = await db.one(
+          `SELECT id FROM wr_job_runs WHERE job = 'discovery' AND trigger = 'auto' AND status IN ('ok','partial')
+             AND started_at >= date_trunc('day', now()) LIMIT 1`)
+        if (done) return { skipped: true, reason: `今天的自动采集已完成（运行 #${done.id}），跳过以免重复扣点` }
+      }
+      if (dryRun) return { skipped: false, dryRun: true }
+      return await doRun(trigger)
+    } finally {
+      await lock.release()
+    }
+  })().finally(() => { running = null })
+  return running
+}
+
+async function doRun(trigger) {
+  {
     const cfg = await loadConfig()
-    const run = await db.one(`INSERT INTO wr_job_runs (job, trigger, status) VALUES ('discovery', $1, 'running') RETURNING id`, [trigger])
+    const run = await db.one(`INSERT INTO wr_job_runs (job, trigger, status, instance) VALUES ('discovery', $1, 'running', $2) RETURNING id`,
+      [trigger, instanceName()])
     const ctx = {
       trigger, cfg, budgetBlocked: null, resolveLeft: cfg.resolve_per_run, touched: new Set(),
       stats: { identity: { searched: 0, errors: 0 } }, errors: [],
@@ -518,14 +544,13 @@ async function runDiscovery({ trigger = 'auto' } = {}) {
       news_watermark: ctx.newsWatermark || prev.news_watermark || null,
     })
     return { runId: run.id, status, stats }
-  })().finally(() => { running = null })
-  return running
+  }
 }
 
 const isRunning = () => !!running
 
 module.exports = {
-  runDiscovery, isRunning, DEFAULT_CONFIG, CORE_CHAINS, EXTRACTION_RULE_VERSION,
+  runDiscovery, isRunning, DEFAULT_CONFIG, CORE_CHAINS, EXTRACTION_RULE_VERSION, LOCK_KEY,
   // 供自检使用的内部函数
   _internal: { resolveByName, matchByName, insertEvent, linkEvent, surf, detailCandidates, markDetailNotFound, nextWatermark },
 }

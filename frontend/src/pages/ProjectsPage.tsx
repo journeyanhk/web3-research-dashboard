@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { getJson, sendJson, fmtNum, fmtTime } from '@/lib/fetcher'
-import { CHAINS, STAGE_LABEL, STAGE_ORDER, IDENTITY_LABEL, SOURCE_LABEL, TGE_LABEL, chainText } from '@/lib/labels'
+import { getJson, sendJson, fmtNum, fmtTime, fmtAgo } from '@/lib/fetcher'
+import { CHAINS, STAGE_LABEL, STAGE_ORDER, IDENTITY_LABEL, SOURCE_LABEL, TGE_LABEL, FRESHNESS_LABEL, chainText } from '@/lib/labels'
 
 interface PoolRow {
   id: number
@@ -25,6 +25,9 @@ interface PoolRow {
   twitter_handle?: string | null
   event_count: number
   note_count: number
+  freshness?: string | null
+  last_detail_at?: string | null
+  last_metric_at?: string | null
 }
 interface PoolResponse {
   data: PoolRow[]
@@ -89,7 +92,7 @@ export default function ProjectsPage() {
         <div>
           <h1 className="text-xl font-bold">项目池</h1>
           <p className="text-sm text-fg-subtle mt-1">
-            前 5 个阶段由规则自动判断；进入深度尽调及之后的阶段需人工设定。初筛需满足至少 1 个硬条件 + 1 个加分条件，且证据来自至少 2 个独立来源。
+            前 5 个阶段由规则自动判断；进入深度尽调及之后的阶段需人工设定。初筛需满足至少 1 个硬条件 + 1 个加分条件，且证据涉及至少 2 类数据。
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -149,7 +152,7 @@ export default function ProjectsPage() {
             <p className="text-sm text-fg-subtle p-5">没有符合条件的项目。</p>
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full text-sm min-w-[1060px]">
+              <table className="w-full text-sm min-w-[1140px]">
                 <thead>
                   <tr className="text-left text-xs text-fg-muted">
                     <th className="font-normal py-2 pl-5">项目</th>
@@ -158,6 +161,7 @@ export default function ProjectsPage() {
                     <th className="font-normal py-2">身份</th>
                     <th className="font-normal py-2">链</th>
                     <th className="font-normal py-2 text-right">资料完整度</th>
+                    <th className="font-normal py-2">数据新鲜度</th>
                     <th className="font-normal py-2">TGE</th>
                     <th className="font-normal py-2 text-right">事件</th>
                     <th className="font-normal py-2 text-right">已用点数</th>
@@ -188,6 +192,10 @@ export default function ProjectsPage() {
                         <td className="py-2 pr-3 whitespace-nowrap" title={id.tip}><span className={id.cls}>{id.text}</span></td>
                         <td className="py-2 pr-3 text-fg-subtle whitespace-nowrap">{chainText(p.chains)}</td>
                         <td className="py-2 pr-3 text-right tabular-nums">{p.completeness != null ? `${Math.round(p.completeness * 100)}%` : '—'}</td>
+                        <td className="py-2 pr-3 whitespace-nowrap" title={`最近事件 ${fmtAgo(p.last_event_at)} · 最近详情 ${fmtAgo(p.last_detail_at)} · 最近指标 ${fmtAgo(p.last_metric_at)}`}>
+                          {(() => { const f = FRESHNESS_LABEL[p.freshness ?? 'expired'] ?? FRESHNESS_LABEL.expired; return <span className={f.cls}>{f.text}</span> })()}
+                          <div className="text-[11px] text-fg-muted">事件 {fmtAgo(p.last_event_at)}</div>
+                        </td>
                         <td className="py-2 pr-3 text-fg-subtle whitespace-nowrap">{p.tge_status ? TGE_LABEL[p.tge_status] ?? p.tge_status : '—'}</td>
                         <td className="py-2 pr-3 text-right tabular-nums">{fmtNum(p.event_count)}</td>
                         <td className="py-2 pr-3 text-right tabular-nums">{fmtNum(p.credits_spent, 1)}</td>

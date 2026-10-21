@@ -1,9 +1,8 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { getJson, sendJson, fmtNum, fmtTime } from '@/lib/fetcher'
-import { api } from '@/lib/api'
+import { getJson, sendJson, fmtNum, fmtTime, fmtAgo } from '@/lib/fetcher'
 import {
-  STAGE_LABEL, STAGE_ORDER, AUTO_STAGES, IDENTITY_LABEL, SOURCE_LABEL, TGE_LABEL, LINK_LABEL, CONFIDENCE_LABEL, ID_TYPE_LABEL, chainText,
+  STAGE_LABEL, STAGE_ORDER, IDENTITY_LABEL, SOURCE_LABEL, TGE_LABEL, LINK_LABEL, CONFIDENCE_LABEL, ID_TYPE_LABEL, FRESHNESS_LABEL, chainText,
 } from '@/lib/labels'
 
 interface Cond { met: boolean | null; label: string; note?: string | null }
@@ -14,6 +13,9 @@ interface Facts {
   missing?: string[]
   origins?: Record<string, string[]>
   independent_sources?: number
+  evidence_categories?: number
+  product_evidence_level?: string | null
+  rule_version?: string
 }
 interface Project {
   id: number
@@ -39,6 +41,10 @@ interface Project {
   first_seen_at: string
   discovery_source?: string | null
   review_status?: string | null
+  freshness?: string | null
+  last_event_at?: string | null
+  last_detail_at?: string | null
+  last_metric_at?: string | null
 }
 interface Detail {
   project: Project
@@ -54,7 +60,7 @@ interface Detail {
     id: number; status: string; reason?: string | null; decided_by?: string | null; created_at: string; merged_at?: string | null
     other_id: number; other_name: string; other_domain?: string | null; other_twitter?: string | null
   }[]
-  history: { id: number; from_stage?: string | null; to_stage: string; source: string; reason?: string | null; created_at: string }[]
+  history: { id: number; from_stage?: string | null; to_stage: string; source: string; reason?: string | null; operator?: string | null; rule_version?: string | null; created_at: string }[]
   notes: { id: number; body: string; created_at: string; updated_at: string }[]
   ambiguous: { id: number; event_type: string; title?: string | null; event_at?: string | null }[]
   redirect?: number
@@ -134,7 +140,7 @@ function StageControl({ p }: { p: Project }) {
       <div className="flex flex-wrap items-center gap-2 mt-4">
         <select value={stage} onChange={(e) => setStage(e.target.value)}
           className="rounded-md border border-border-base bg-background px-2 py-1.5 text-sm focus:outline-none focus:border-border-focus">
-          {STAGE_ORDER.map((s) => <option key={s} value={s}>{STAGE_LABEL[s]}{AUTO_STAGES.has(s) ? '' : ''}</option>)}
+          {STAGE_ORDER.map((s) => <option key={s} value={s}>{STAGE_LABEL[s]}</option>)}
         </select>
         <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="调整理由（必填，会记入历史）"
           className="flex-1 min-w-[200px] rounded-md border border-border-base bg-transparent px-2.5 py-1.5 text-sm focus:outline-none focus:border-border-focus" />
@@ -165,10 +171,7 @@ function Notes({ projectId, notes }: { projectId: number; notes: Detail['notes']
     onSuccess: () => { setEditing(null); refresh() },
   })
   const remove = useMutation({
-    mutationFn: async (id: number) => {
-      const r = await fetch(api(`projects/notes/${id}`), { method: 'DELETE' })
-      if (!r.ok) throw new Error('删除失败')
-    },
+    mutationFn: (id: number) => sendJson(`projects/notes/${id}`, 'DELETE'),
     onSuccess: refresh,
   })
   const area = 'w-full rounded-md border border-border-base bg-transparent px-2.5 py-2 text-sm focus:outline-none focus:border-border-focus'
@@ -253,6 +256,10 @@ export default function ProjectDetailPage({ id }: { id: number }) {
           <span>首次发现 {fmtTime(p.first_seen_at)}（{SOURCE_LABEL[p.discovery_source ?? ''] ?? p.discovery_source ?? '—'}）</span>
           <span>信号：{p.signal_label ?? '—'}</span>
           <span>已用 {fmtNum(Number(p.credits_spent), 1)} 点</span>
+          <span title={FRESHNESS_LABEL[p.freshness ?? 'expired']?.tip}>
+            数据<span className={FRESHNESS_LABEL[p.freshness ?? 'expired']?.cls}>{FRESHNESS_LABEL[p.freshness ?? 'expired']?.text}</span>
+            （事件 {fmtAgo(p.last_event_at)} · 详情 {fmtAgo(p.last_detail_at)} · 指标 {fmtAgo(p.last_metric_at)}）
+          </span>
         </div>
         {p.description && <p className="text-sm text-fg-subtle mt-2 max-w-[900px]">{p.description}</p>}
       </div>
@@ -260,7 +267,7 @@ export default function ProjectDetailPage({ id }: { id: number }) {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
         <div className="lg:col-span-2 flex flex-col gap-5">
           <StageControl p={p} key={`${p.stage}-${p.stage_source}`} />
-          <Card title="初筛条件" desc={`至少 1 个硬条件 + 1 个加分条件，且来自 ≥2 个独立来源。当前独立来源：${facts.independent_sources ?? 0} 个。`}>
+          <Card title="初筛条件" desc={`至少 1 个硬条件 + 1 个加分条件，且证据涉及 ≥2 类数据。当前：${facts.evidence_categories ?? facts.independent_sources ?? 0} 类。产品证据强度：${facts.product_evidence_level === 'high' ? '高（合约 / TVL）' : facts.product_evidence_level === 'low' ? '低（仅空投任务，候选信号）' : '无'}。规则版本 ${facts.rule_version ?? '—'}。`}>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
               <div>
                 <div className="text-xs text-fg-subtle mb-2">硬条件</div>
@@ -385,7 +392,9 @@ export default function ProjectDetailPage({ id }: { id: number }) {
                 <li key={h.id} className="border-t border-border-base py-1.5 first:border-t-0">
                   <div>
                     {h.from_stage ? `${STAGE_LABEL[h.from_stage] ?? h.from_stage} → ` : ''}{STAGE_LABEL[h.to_stage] ?? h.to_stage}
-                    <span className="text-[11px] text-fg-muted ml-1.5">{h.source === 'manual' ? '人工' : '自动'} · {fmtTime(h.created_at)}</span>
+                    <span className="text-[11px] text-fg-muted ml-1.5">
+                      {h.source === 'manual' ? `人工（${h.operator ?? 'self'}）` : `自动 ${h.rule_version ?? ''}`} · {fmtTime(h.created_at)}
+                    </span>
                   </div>
                   {h.reason && <div className="text-[11px] text-fg-muted">{h.reason}</div>}
                 </li>

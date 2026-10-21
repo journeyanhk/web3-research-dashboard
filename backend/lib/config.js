@@ -29,7 +29,7 @@ function getSecret(name) {
 // 返回所有已配置的密钥值（用于自检：确保它们没有出现在日志/存档里）
 function secretValues() {
   loadLocalEnv()
-  return ['HELIUS_API_KEY', 'SURF_API_KEY', 'GITHUB_TOKEN']
+  return ['HELIUS_API_KEY', 'SURF_API_KEY', 'GITHUB_TOKEN', 'DATABASE_URL', 'ADMIN_PASSWORD', 'AUTH_SECRET']
     .map((k) => process.env[k])
     .filter((v) => v && v.length >= 12)
 }

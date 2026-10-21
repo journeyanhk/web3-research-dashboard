@@ -227,6 +227,8 @@ async function runSelftest() {
 
   // ───── 边界（M1.1）：用临时项目验证，跑完全部清理 ─────
   await boundaryTests(results)
+  // ───── 部署前检查（M2.1）─────
+  await deployTests(results)
 
   results.push({ group: '评分', name: '三个真实项目的评分验收', ok: null, detail: '评分模块在 M3 完成后执行（ETH / SOL / Robinhood Chain 各一个）' })
 
@@ -374,6 +376,76 @@ async function boundaryTests(results) {
       await db.query('DELETE FROM wr_events WHERE external_id LIKE $1', [`${tag}%`])
     }
   }
+}
+
+async function deployTests(results) {
+  const { listProjects } = require('./projectQuery')
+  await step(results, '部署', '项目池筛选：链 / 来源 / 关键词及组合都能正确查询', async () => {
+    const combos = [
+      {}, { chain: 'ethereum' }, { source: 'airdrop' }, { q: 'uni' }, { chain: 'ethereum', stage: 'screening' },
+      { q: 'uni', source: 'fundraising' }, { q: 'a', chain: 'solana', source: 'airdrop', identity: 'confirmed', stage: 'screening', sort: 'credits' },
+      { q: "%_'\\" }, { q: 'zz-no-such-project-zz' }, { limit: 5, offset: 5 },
+    ]
+    for (const c of combos) {
+      const r = await listProjects({ ...c, limit: c.limit ?? 200 })
+      assert(Array.isArray(r.data), `${JSON.stringify(c)} 没有返回数组`)
+      const all = await listProjects({ ...c, limit: 200, offset: 0 })
+      if (!c.limit) assert(all.total === all.data.length || all.total > 200, `${JSON.stringify(c)} 的总数 ${all.total} 与结果 ${all.data.length} 不一致`)
+      if (!c.stage) {
+        const sum = Object.values(r.stage_counts).reduce((a, b) => a + b, 0)
+        assert(sum === r.total, `${JSON.stringify(c)} 的阶段计数合计 ${sum} ≠ 总数 ${r.total}`)
+      }
+    }
+    // 阶段计数不受阶段筛选影响
+    const a = await listProjects({ chain: 'ethereum' })
+    const b = await listProjects({ chain: 'ethereum', stage: 'screening' })
+    assert(JSON.stringify(a.stage_counts) === JSON.stringify(b.stage_counts), '阶段计数受到了阶段筛选影响')
+    assert(b.total === (a.stage_counts.screening || 0), '阶段筛选后的总数与阶段计数不一致')
+    const page = await listProjects({ limit: 5, offset: 5 })
+    assert(page.data.length <= 5, '分页数量错误')
+    return `${combos.length} 种组合全部正常；无结果返回空数组；阶段计数与总数一致`
+  })
+  await step(results, '部署', '未登录访问业务接口被拒绝', async () => {
+    const port = process.env.BACKEND_PORT || 3001
+    const base = `http://127.0.0.1:${port}/api`
+    const codes = {}
+    for (const path of ['projects', 'radar/overview', 'system/overview']) {
+      const r = await fetch(`${base}/${path}`)
+      codes[path] = r.status
+    }
+    const bad = Object.entries(codes).filter(([, c]) => c !== 401)
+    assert(bad.length === 0, `以下接口未受保护：${bad.map(([p, c]) => `${p}=${c}`).join(', ')}`)
+    const forged = await fetch(`${base}/projects`, { headers: { authorization: 'Bearer eyJleHAiOjk5OTk5OTk5OTk5OTl9.forged' } })
+    assert(forged.status === 401, '伪造令牌被接受')
+    const health = await fetch(`${base}/health`)
+    assert(health.status === 200, '健康检查不可用')
+    return '3 个业务接口均返回 401；伪造令牌被拒绝；健康检查正常'
+  })
+  await step(results, '部署', '两个环境不会同时采集 / 重复自动采集', async () => {
+    // 全部使用 dryRun：即使锁失效也不会真的发起采集
+    const { runDiscovery, LOCK_KEY } = require('./collect/discovery')
+    const before = await db.one(`SELECT count(*)::int c FROM wr_api_usage WHERE task LIKE 'discovery_%'`)
+    const l1 = await db.lock(`${LOCK_KEY}-selftest`, 60)
+    const l2 = await db.lock(`${LOCK_KEY}-selftest`, 60)
+    assert(l1 && !l2, '同一把锁被重复获取')
+    await l1.release()
+    const l3 = await db.lock(`${LOCK_KEY}-selftest`, 60)
+    assert(l3, '释放后无法再次获取')
+    await l3.release()
+    const held = await db.lock(LOCK_KEY, 60)
+    assert(held, '无法获取采集锁（可能真的有采集在运行，稍后重试）')
+    let r1
+    try { r1 = await runDiscovery({ trigger: 'auto', dryRun: true }) } finally { await held.release() }
+    assert(r1?.skipped && /锁/.test(r1.reason), `锁被占用时没有跳过：${JSON.stringify(r1)}`)
+    const fake = await db.one(
+      `INSERT INTO wr_job_runs (job, trigger, status, instance, finished_at) VALUES ('discovery','auto','ok','selftest', now()) RETURNING id`)
+    let r2
+    try { r2 = await runDiscovery({ trigger: 'auto', dryRun: true }) } finally { await db.query('DELETE FROM wr_job_runs WHERE id = $1', [fake.id]) }
+    assert(r2?.skipped && /今天/.test(r2.reason), `当天已有自动采集时没有跳过：${JSON.stringify(r2)}`)
+    const after = await db.one(`SELECT count(*)::int c FROM wr_api_usage WHERE task LIKE 'discovery_%'`)
+    assert(after.c === before.c, '跳过时仍然发起了采集请求')
+    return '锁不能重复获取、释放后可再取；锁被占用 → 跳过；当天已有自动采集 → 跳过；均未产生请求'
+  })
 }
 
 module.exports = { runSelftest }

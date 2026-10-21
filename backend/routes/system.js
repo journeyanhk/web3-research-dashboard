@@ -6,6 +6,8 @@ const budget = require('../lib/budget')
 const { runSelftest } = require('../lib/selftest')
 
 const router = Router()
+// 所有接口需要登录（见 lib/auth.js）
+router.use(require('../lib/auth').requireAuth)
 const wrap = (fn) => (req, res) => fn(req, res).catch((e) => {
   console.error('[system]', e.message)
   res.status(500).json({ error: e.message })

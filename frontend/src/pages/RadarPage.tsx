@@ -65,7 +65,7 @@ interface Quality {
   identity: { confirmed: number; partial: number; name_only: number }
   daily: { day: string; actual: number; estimated: number; cached: number; calls: number; errors: number }[]
   providerFail: { provider: string; calls: number; errors: number }[]
-  runs: { id: number; trigger: string; status: string; started_at: string; finished_at?: string | null; credits?: string | null }[]
+  runs: { id: number; trigger: string; status: string; started_at: string; finished_at?: string | null; credits?: string | null; instance?: string | null; note?: string | null }[]
   screening?: { projects: number; credits: number; per_100: number | null }
 }
 
@@ -544,6 +544,8 @@ function QualityPanel() {
               <li key={r.id}>
                 {fmtTime(r.started_at)} · {r.trigger === 'auto' ? '自动' : '手动'} · {RUN_STATUS[r.status] ?? r.status}
                 {r.credits != null ? ` · ${r.credits} 点` : ''}
+                {r.instance ? ` · 环境 ${r.instance}` : ''}
+                {r.note ? ` · ${r.note}` : ''}
               </li>
             ))}
           </ul>

@@ -32,8 +32,11 @@ function coverageFor(stage) {
   return 'discovery'
 }
 
+const RULE_VERSION = 'pipeline-v2'
 const CORE_CHAINS = ['ethereum', 'bsc', 'base', 'arbitrum', 'solana', 'robinhood']
-const PRODUCT_TASK_TYPES = new Set(['mainnet', 'testnet', 'trading', 'staking', 'liquidity', 'node', 'depin', 'deploy'])
+// 产品证据分层（M2.1）：空投任务只能作为「产品候选信号」，且只有主网/测试网/部署/节点类任务才算；
+// 交易、质押、提供流动性任务可能只是要求用户与第三方协议交互，不算产品证据
+const PRODUCT_TASK_TYPES = new Set(['mainnet', 'testnet', 'node', 'deploy'])
 const SIGNAL_GROUP = { fundraising: '融资', public_sale: '融资', airdrop: '空投', listing: '代币', tge: '代币', news: '新闻' }
 
 const HARD_LABEL = {
@@ -110,6 +113,9 @@ async function gatherFacts(ids) {
     mark('verifiable_product', 'detail', types.has('contract'))
     mark('verifiable_product', 'metrics', metrics.tvl_usd > 0)
     mark('verifiable_product', 'airdrop', [...taskTypes].some((t) => PRODUCT_TASK_TYPES.has(t)))
+    // 产品证据强度：合约 / TVL = 高；仅空投任务 = 低（候选信号，M3 评分时不给高分）
+    const productLevel = types.has('contract') || metrics.tvl_usd > 0 ? 'high'
+      : [...taskTypes].some((t) => PRODUCT_TASK_TYPES.has(t)) ? 'low' : null
     mark('token_plan', 'detail', ['pre', 'upcoming'].includes(p.tge_status))
     mark('token_plan', 'fundraising', evs.some((e) => e.event_type === 'public_sale'))
     mark('token_plan', 'token', evs.some((e) => ['listing', 'tge'].includes(e.event_type)))
@@ -154,13 +160,15 @@ async function gatherFacts(ids) {
       signal: signalLabel(groups, hard.verifiable_product),
       conflict: conflictSet.has(p.id),
       origins: Object.fromEntries(Object.entries(origins).map(([k, v]) => [k, [...v]])),
+      productLevel,
     }
   })
 }
 
 const ORIGIN_LABEL = { fundraising: '融资事件', airdrop: '空投数据', token: '上币 / TGE', detail: '项目详情', metrics: '指标', multi: '多来源' }
 
-// 满足的条件背后有几个独立来源（「多个来源同时出现」本身就代表 ≥2）
+// 满足的条件背后涉及几类数据证据（「多个来源同时出现」本身就代表 ≥2）。
+// 注意：这是「数据证据类别」，不等于真正独立的事实来源——多类数据可能来自同一上游（M3 再细分）
 function independentSources(f, hardMet, bonusMet) {
   const set = new Set([...hardMet, ...bonusMet].flatMap((k) => f.origins[k] || []))
   if (set.has('multi')) return Math.max(2, set.size - 1)
@@ -179,7 +187,7 @@ function decideStage(f) {
     reason = '存在待判断的疑似重复或身份冲突'
   } else if (hardMet.length >= 1 && bonusMet.length >= 1 && f.identity !== 'name_only' && independentSources(f, hardMet, bonusMet) >= 2) {
     stage = 'screening'
-    reason = `满足硬条件：${hardMet.map((k) => HARD_LABEL[k]).join('、')}；加分：${bonusMet.map((k) => BONUS_LABEL[k]).join('、')}（${independentSources(f, hardMet, bonusMet)} 个独立来源）`
+    reason = `满足硬条件：${hardMet.map((k) => HARD_LABEL[k]).join('、')}；加分：${bonusMet.map((k) => BONUS_LABEL[k]).join('、')}（${independentSources(f, hardMet, bonusMet)} 类数据证据）`
   } else if (f.identity === 'name_only') {
     stage = 'data_incomplete'
     reason = hardMet.length ? '有信号，但身份只有名称，需先补全身份' : '身份只有名称'
@@ -187,7 +195,7 @@ function decideStage(f) {
     stage = 'pending_verify'
     reason = !hardMet.length ? '只有加分条件，没有满足任何硬条件'
       : !bonusMet.length ? '满足硬条件，但没有加分条件'
-        : `证据只来自单一来源（${[...new Set([...hardMet, ...bonusMet].flatMap((k) => f.origins[k] || []))].map((o) => ORIGIN_LABEL[o] || o).join('、')}），需要其他来源确认`
+        : `证据只有一类数据（${[...new Set([...hardMet, ...bonusMet].flatMap((k) => f.origins[k] || []))].map((o) => ORIGIN_LABEL[o] || o).join('、')}），需要其他类别的数据确认`
   } else {
     stage = 'discovered'
     reason = '暂无可验证的信号'
@@ -200,7 +208,10 @@ function decideStage(f) {
       completeness: Object.fromEntries(COMPLETENESS_ITEMS.map(([k, l]) => [k, { met: f.completeness[k], label: l }])),
       missing, identity: f.identity, conflict: f.conflict,
       origins: Object.fromEntries(Object.entries(f.origins).map(([k, v]) => [k, v.map((o) => ORIGIN_LABEL[o] || o)])),
-      independent_sources: independentSources(f, hardMet, bonusMet),
+      independent_sources: independentSources(f, hardMet, bonusMet), // 数据证据类别数（字段名保留以兼容）
+      evidence_categories: independentSources(f, hardMet, bonusMet),
+      product_evidence_level: f.productLevel || null,
+      rule_version: RULE_VERSION,
     },
   }
 }
@@ -249,8 +260,10 @@ async function setStage(projectId, stage, { source, reason, facts = null, from }
       [projectId, stage, source, reason || null, coverageFor(stage)],
     )
     await q(
-      `INSERT INTO wr_stage_history (project_id, from_stage, to_stage, source, reason, facts) VALUES ($1,$2,$3,$4,$5,$6)`,
-      [projectId, cur?.stage || null, stage, source, reason || null, facts ? JSON.stringify(facts) : null],
+      `INSERT INTO wr_stage_history (project_id, from_stage, to_stage, source, reason, facts, operator, rule_version)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [projectId, cur?.stage || null, stage, source, reason || null, facts ? JSON.stringify(facts) : null,
+        source === 'manual' ? 'self' : 'system', source === 'auto' ? RULE_VERSION : null],
     )
   })
 }
@@ -278,6 +291,6 @@ async function restoreAuto(projectId) {
 }
 
 module.exports = {
-  STAGES, AUTO_STAGES, COMPLETENESS_ITEMS, HARD_LABEL, BONUS_LABEL, coverageFor,
+  STAGES, AUTO_STAGES, COMPLETENESS_ITEMS, HARD_LABEL, BONUS_LABEL, RULE_VERSION, coverageFor,
   evaluateProjects, setStageManual, restoreAuto, decideStage, signalLabel,
 }
