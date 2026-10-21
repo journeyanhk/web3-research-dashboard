@@ -11,7 +11,7 @@ const wrap = (fn) => (req, res) => fn(req, res).catch((e) => {
   res.status(500).json({ error: e.message })
 })
 
-const EDITABLE = new Set(['surf_budget', 'helius_budget', 'coverage_weights', 'robinhood_review_gate'])
+const EDITABLE = new Set(['surf_budget', 'helius_budget', 'coverage_weights', 'robinhood_review_gate', 'discovery_config'])
 
 router.get('/overview', wrap(async (_req, res) => {
   await registry.ensureSeeded()

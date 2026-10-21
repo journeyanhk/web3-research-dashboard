@@ -22,12 +22,37 @@ backend/
   lib/identity.js       项目身份确认、去重与合并（见下方规则）
   lib/metrics.js        指标写入（只追加，记录主源 / 备用源）
   lib/selftest.js       验收自检
+  lib/collect/          M1 全局发现：extract.js（标题解析）、discovery.js（采集 + 身份确认）
+  jobs/discovery.js     定时任务入口（cron.json：每日 01:17 UTC / 北京 09:17）
   routes/system.js      /api/system/*（概览、调用记录、配置、自检）
   routes/projects.js    /api/projects/*（身份冲突队列；M2 扩展项目池）
+  routes/radar.js       /api/radar/*（雷达概览、采集质量、手动采集）
 frontend/src/
   App.tsx               导航
+  pages/RadarPage.tsx   项目雷达
   pages/SystemPage.tsx  数据与点数
 ```
+
+## 命令
+
+```bash
+cd backend
+npm run check   # 静态检查：语法、迁移编号、cron 配置（不花点数）
+npm test        # check + 验收自检（真实数据，约 Surf 1–2 点、Helius 10 credits）
+```
+
+## M1 采集规则（试跑期）
+
+| 数据 | 每次 | 建项目条件 | 关联方式 |
+|---|---|---|---|
+| 融资 / 公募 | ≤50 条，近 3 天 | 重要度 ≥3、能从标题识别项目名、非股票/ETF | 同名项目 → Surf 名称完全一致 → 仅名称建档 |
+| 空投 | ≤50 条 | 有 Surf ID / 有融资额 / 社交分 ≥50 | Surf ID；否则仅名称（不再查 Surf） |
+| 上币（含盘前合约） | ≤100 条 | 不建项目 | 代币符号唯一时关联已有项目 |
+| 新闻 | ≤100 条 | 不建项目 | Surf 项目 ID |
+| 项目详情 | ≤10 个 | — | 补官网、X、合约、链、TGE 状态、代币数据 |
+
+每次运行最多按名称查 Surf 15 次；同一项目查找冷却 7 天；Surf 中 404 的项目不再重复请求。
+所有规模参数在注册表 `setting/discovery_config` 中，可调整。雷达只展示发现，不展示评分。
 
 ## 环境变量
 
@@ -57,7 +82,7 @@ frontend/src/
 
 - [x] M0 基础底座（数据表、链能力矩阵、数据源记账、预算限额、原始存档、去重、自检）
 - [x] M0.1 Review 修正（身份合并与冲突队列、预算累计语义、预估/实际成本、自检补强）
-- [ ] M1 全局发现 + 身份确认 + 雷达首页
+- [x] M1 全局发现 + 身份确认 + 雷达首页（试跑中）
 - [ ] M2 项目池与状态流转
 - [ ] M3 全自动评分
 - [ ] M4 TGE / 解锁 + SOL 外部数据 + Robinhood Chain

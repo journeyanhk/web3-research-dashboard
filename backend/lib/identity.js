@@ -1,7 +1,9 @@
 // 项目身份确认、去重与合并
 //
 // 高置信度（自动合并）：Surf 项目 ID 相同；或同一条链上合约地址相同；或官网域名 + 官方 X 账号同时相同
-// 低置信度（只进冲突队列，不合并）：只有域名相同、只有 X 账号相同（同一官网下多个产品、改名等情况）
+// 低置信度（只进冲突队列，不合并）：只有域名相同、只有 X 账号相同、只有名称相同
+// 特例：本次输入「只有名称」（例如从融资标题提取的项目名）且已有同名项目 → 直接挂到该项目，不新建也不入队
+const MERGE_RULE_VERSION = 'identity-v1'
 const db = require('./db')
 const { raiseAlert } = require('./alerts')
 
@@ -9,7 +11,9 @@ const EVM_CHAINS = new Set(['ethereum', 'bsc', 'base', 'arbitrum', 'robinhood', 
 const STRONG_TYPES = new Set(['surf_id', 'contract'])
 
 // 引用 project_id 的表：合并时统一迁移。后续里程碑新增的表（事件、评分、快照…）需要加到这里。
-const PROJECT_REF_TABLES = ['wr_metrics', 'wr_alerts', 'wr_api_usage']
+const PROJECT_REF_TABLES = ['wr_metrics', 'wr_alerts', 'wr_api_usage', 'wr_events']
+// 不需要迁移的表：身份标识单独处理；关系表本身记录合并历史
+const PROJECT_REF_EXEMPT = ['wr_project_ids', 'wr_project_relations']
 
 const LEVEL_ORDER = ['discovery', 'screening', 'deep_research', 'tge_watch']
 
@@ -53,8 +57,17 @@ function normalizeContract(chain, address) {
   return `${c}:${addr}`
 }
 
+// 名称标准化：小写，去掉空格与常见标点（"Lighthouse.storage" / "lighthouse storage" 视为相同）
+function normalizeName(name) {
+  if (!name) return null
+  const s = String(name).toLowerCase().normalize('NFKC').replace(/[\s._\-·•'’"“”()（）]+/g, '')
+  return s.length >= 2 ? s : null
+}
+
 function buildIdentifiers(input) {
   const ids = []
+  const n = normalizeName(input.name)
+  if (n) ids.push(['name', n])
   if (input.surfId) ids.push(['surf_id', String(input.surfId)])
   const d = normalizeDomain(input.website)
   if (d) ids.push(['domain', d])
@@ -68,21 +81,39 @@ function buildIdentifiers(input) {
 }
 
 // 根据标识命中情况，把候选项目分成强匹配 / 弱匹配
+const WEAK_LABEL = { domain: '官网域名相同', twitter: 'X 账号相同', name: '名称相同' }
+
 function classifyMatches(rows) {
   const per = new Map()
   for (const r of rows) {
-    if (!per.has(r.project_id)) per.set(r.project_id, new Set())
-    per.get(r.project_id).add(r.id_type)
+    if (!per.has(r.project_id)) per.set(r.project_id, new Map())
+    const m = per.get(r.project_id)
+    if (!m.has(r.id_type)) m.set(r.id_type, [])
+    m.get(r.id_type).push(r.id_value)
   }
   const strong = []
   const weak = []
-  for (const [pid, types] of per) {
+  for (const [pid, typeMap] of per) {
     const reasons = []
-    if (types.has('surf_id')) reasons.push('Surf 项目 ID 相同')
-    if (types.has('contract')) reasons.push('合约地址相同')
-    if (types.has('domain') && types.has('twitter')) reasons.push('官网域名与 X 账号同时相同')
-    if (reasons.length) strong.push({ projectId: pid, reasons })
-    else weak.push({ projectId: pid, reasons: [...types].map((t) => (t === 'domain' ? '官网域名相同' : 'X 账号相同')) })
+    const matched = []
+    if (typeMap.has('surf_id')) { reasons.push('Surf 项目 ID 相同'); matched.push(...typeMap.get('surf_id').map((v) => ({ type: 'surf_id', value: v }))) }
+    if (typeMap.has('contract')) {
+      reasons.push('合约地址相同')
+      matched.push(...typeMap.get('contract').map((v) => { const [chain, ...a] = v.split(':'); return { type: 'contract', chain, address: a.join(':') } }))
+    }
+    if (typeMap.has('domain') && typeMap.has('twitter')) {
+      reasons.push('官网域名与 X 账号同时相同')
+      matched.push({ type: 'domain', value: typeMap.get('domain')[0] }, { type: 'twitter', value: typeMap.get('twitter')[0] })
+    }
+    if (reasons.length) strong.push({ projectId: pid, reasons, matched })
+    else {
+      weak.push({
+        projectId: pid,
+        types: [...typeMap.keys()],
+        reasons: [...typeMap.keys()].map((t) => WEAK_LABEL[t] || t),
+        matched: [...typeMap.entries()].flatMap(([type, vals]) => vals.map((value) => ({ type, value }))),
+      })
+    }
   }
   return { strong, weak }
 }
@@ -167,6 +198,13 @@ async function mergeProjects(sourceId, targetId, { reason, confidence = 'high', 
     await q('UPDATE wr_projects SET merged_into = $2 WHERE merged_into = $1', [sourceId, targetId])
 
     const [x, y] = pair(sourceId, targetId)
+    // 审计信息：命中的标识（合约含链与地址）、合并前名称与链、规则版本
+    const audit = {
+      ...(evidence || {}),
+      merge_rule_version: MERGE_RULE_VERSION,
+      source: { id: src.id, name: src.name, chains: src.chains, surf_project_id: src.surf_project_id },
+      target: { id: tgt.id, name: tgt.name, chains: tgt.chains, surf_project_id: tgt.surf_project_id },
+    }
     await q(
       `INSERT INTO wr_project_relations (project_a, project_b, status, reason, confidence, evidence,
          source_project_id, target_project_id, merged_at, decided_by, decided_at)
@@ -174,7 +212,7 @@ async function mergeProjects(sourceId, targetId, { reason, confidence = 'high', 
        ON CONFLICT (project_a, project_b) DO UPDATE SET status = 'confirmed_same', reason = EXCLUDED.reason,
          confidence = EXCLUDED.confidence, source_project_id = EXCLUDED.source_project_id,
          target_project_id = EXCLUDED.target_project_id, merged_at = now(), decided_by = EXCLUDED.decided_by, decided_at = now()`,
-      [x, y, reason || null, confidence, JSON.stringify(evidence || {}), sourceId, targetId, by],
+      [x, y, reason || null, confidence, JSON.stringify(audit), sourceId, targetId, by],
     )
     // 与源项目相关的未处理疑似重复关系，转到目标项目上重新判断
     await q(
@@ -198,7 +236,10 @@ async function decideRelation(relationId, decision) {
   if (decision === 'same') {
     const target = Math.min(rel.project_a, rel.project_b)
     const source = Math.max(rel.project_a, rel.project_b)
-    await mergeProjects(source, target, { reason: `人工确认相同（${rel.reason || ''}）`, confidence: 'high', by: 'user' })
+    await mergeProjects(source, target, {
+      reason: `人工确认相同（${rel.reason || ''}）`, confidence: 'high', by: 'user',
+      evidence: { queue_evidence: rel.evidence || null },
+    })
   } else if (decision === 'different') {
     await db.query(
       `UPDATE wr_project_relations SET status = 'confirmed_different', decided_by = 'user', decided_at = now() WHERE id = $1`,
@@ -238,13 +279,23 @@ async function upsertProject(input) {
   if (ids.length) {
     const conds = ids.map((_, i) => `(i.id_type = $${i * 2 + 1} AND i.id_value = $${i * 2 + 2})`).join(' OR ')
     rows = await db.query(
-      `SELECT i.project_id, i.id_type FROM wr_project_ids i JOIN wr_projects p ON p.id = i.project_id
+      `SELECT i.project_id, i.id_type, i.id_value FROM wr_project_ids i JOIN wr_projects p ON p.id = i.project_id
        WHERE p.merged_into IS NULL AND (${conds})`,
       ids.flat(),
     )
   }
   const { strong, weak } = classifyMatches(rows)
   // 本次输入同时带了域名和 X 账号时，分别命中两个项目也不算强匹配（各自只命中一项）
+
+  // 只有名称的输入：命中同名项目就直接挂过去（多个同名时取最早的），不新建、不入队
+  const nameOnly = ids.length > 0 && ids.every(([t]) => t === 'name')
+  if (nameOnly && strong.length === 0) {
+    const sameName = weak.filter((w) => w.types.includes('name')).map((w) => w.projectId).sort((a, b) => a - b)
+    if (sameName.length) {
+      await db.query('UPDATE wr_projects SET updated_at = now() WHERE id = $1', [sameName[0]])
+      return { id: sameName[0], created: false, merged: [], possibleDuplicates: [], linkedBy: 'name' }
+    }
+  }
 
   const chains = [...new Set((input.chains || []).map(normalizeChain).filter(Boolean))]
   const domain = normalizeDomain(input.website)
@@ -276,7 +327,10 @@ async function upsertProject(input) {
           dedupeKey: `conflict_${id}_${s.projectId}` })
         continue
       }
-      await mergeProjects(s.projectId, id, { reason: s.reasons.join('、'), confidence: 'high', by: 'auto', evidence: { identifiers: ids } })
+      await mergeProjects(s.projectId, id, {
+        reason: s.reasons.join('、'), confidence: 'high', by: 'auto',
+        evidence: { matched_identifiers: s.matched, input_identifiers: ids.map(([type, value]) => ({ type, value })) },
+      })
       merged.push(s.projectId)
     }
     await db.query(
@@ -292,35 +346,126 @@ async function upsertProject(input) {
     )
   }
 
-  // 写入标识：强标识全局唯一（已被其他项目占用则跳过），弱标识按项目唯一
-  for (const [type, value] of ids) {
-    if (STRONG_TYPES.has(type)) {
-      await db.query(
-        `INSERT INTO wr_project_ids (project_id, id_type, id_value, source) VALUES ($1,$2,$3,$4)
-         ON CONFLICT (id_type, id_value) WHERE id_type IN ('surf_id','contract') DO NOTHING`,
-        [id, type, value, input.source || null],
-      )
-    } else {
-      await db.query(
-        `INSERT INTO wr_project_ids (project_id, id_type, id_value, source) VALUES ($1,$2,$3,$4)
-         ON CONFLICT (project_id, id_type, id_value) DO NOTHING`,
-        [id, type, value, input.source || null],
-      )
-    }
-  }
+  await writeIdentifiers(id, ids, input.source)
 
   // 弱匹配：进入冲突队列，不合并
   const possibleDuplicates = []
   for (const w of weak) {
     if (w.projectId === id || merged.includes(w.projectId)) continue
-    await flagPossibleDuplicate(id, w.projectId, w.reasons, { identifiers: ids })
+    await flagPossibleDuplicate(id, w.projectId, w.reasons, { matched_identifiers: w.matched })
     possibleDuplicates.push(w.projectId)
   }
 
-  return { id, created, merged, possibleDuplicates }
+  return { id, created, merged, possibleDuplicates, linkedBy: strong.length ? 'strong' : created ? 'new' : 'weak' }
+}
+
+// 写入标识：强标识全局唯一（已被其他项目占用则跳过），弱标识按项目唯一
+async function writeIdentifiers(id, ids, source) {
+  for (const [type, value] of ids) {
+    if (STRONG_TYPES.has(type)) {
+      await db.query(
+        `INSERT INTO wr_project_ids (project_id, id_type, id_value, source) VALUES ($1,$2,$3,$4)
+         ON CONFLICT (id_type, id_value) WHERE id_type IN ('surf_id','contract') DO NOTHING`,
+        [id, type, value, source || null],
+      )
+    } else {
+      await db.query(
+        `INSERT INTO wr_project_ids (project_id, id_type, id_value, source) VALUES ($1,$2,$3,$4)
+         ON CONFLICT (project_id, id_type, id_value) DO NOTHING`,
+        [id, type, value, source || null],
+      )
+    }
+  }
+}
+
+/**
+ * 给已知项目补充身份（例如拉到项目详情后补官网、X 账号、合约）。
+ * 强标识若已属于其他项目 → 两者是同一项目，自动合并（保留 ID 小的）；弱标识命中其他项目 → 进冲突队列。
+ * 返回最终项目 ID（可能因合并而变化）。
+ */
+async function attachIdentity(projectId, input) {
+  let id = await resolveMerged(projectId)
+  const ids = buildIdentifiers(input)
+  for (const [type, value] of ids.filter(([t]) => STRONG_TYPES.has(t))) {
+    const owner = await db.one(
+      `SELECT i.project_id FROM wr_project_ids i JOIN wr_projects p ON p.id = i.project_id
+       WHERE i.id_type = $1 AND i.id_value = $2 AND p.merged_into IS NULL`,
+      [type, value],
+    )
+    if (!owner || owner.project_id === id) continue
+    if ((await relationStatus(id, owner.project_id)) === 'confirmed_different') {
+      await raiseAlert({ category: 'data', type: 'identity_conflict', severity: 'warn', projectId: id,
+        title: `#${id} 与 #${owner.project_id} 已确认不同，但 ${type === 'surf_id' ? 'Surf ID' : '合约'} 相同`,
+        detail: { type, value }, dedupeKey: `conflict_${Math.min(id, owner.project_id)}_${Math.max(id, owner.project_id)}` })
+      continue
+    }
+    const target = Math.min(id, owner.project_id)
+    const source = Math.max(id, owner.project_id)
+    const matched = type === 'contract'
+      ? (() => { const [chain, ...a] = value.split(':'); return [{ type, chain, address: a.join(':') }] })()
+      : [{ type, value }]
+    await mergeProjects(source, target, {
+      reason: type === 'surf_id' ? 'Surf 项目 ID 相同' : '合约地址相同', confidence: 'high', by: 'auto',
+      evidence: { matched_identifiers: matched, via: 'attachIdentity' },
+    })
+    id = target
+  }
+  await writeIdentifiers(id, ids, input.source)
+
+  // 弱标识命中其他项目 → 冲突队列
+  const weakIds = ids.filter(([t]) => t === 'domain' || t === 'twitter')
+  if (weakIds.length) {
+    const conds = weakIds.map((_, i) => `(i.id_type = $${i * 2 + 2} AND i.id_value = $${i * 2 + 3})`).join(' OR ')
+    const others = await db.query(
+      `SELECT i.project_id, i.id_type, i.id_value FROM wr_project_ids i JOIN wr_projects p ON p.id = i.project_id
+       WHERE p.merged_into IS NULL AND i.project_id <> $1 AND (${conds})`,
+      [id, ...weakIds.flat()],
+    )
+    const { strong, weak } = classifyMatches(others)
+    for (const s of strong) {
+      // 官网 + X 账号同时命中另一个项目 → 高置信度合并
+      const target = Math.min(id, s.projectId)
+      const source = Math.max(id, s.projectId)
+      if ((await relationStatus(target, source)) === 'confirmed_different') continue
+      await mergeProjects(source, target, { reason: s.reasons.join('、'), confidence: 'high', by: 'auto', evidence: { matched_identifiers: s.matched, via: 'attachIdentity' } })
+      id = target
+    }
+    for (const w of weak) await flagPossibleDuplicate(id, w.projectId, w.reasons, { matched_identifiers: w.matched })
+  }
+
+  const chains = [...new Set((input.chains || []).map(normalizeChain).filter(Boolean))]
+  await db.query(
+    `UPDATE wr_projects SET
+       surf_project_id = COALESCE(surf_project_id, $2), symbol = COALESCE(symbol, $3),
+       website_domain = COALESCE(website_domain, $4), twitter_handle = COALESCE(twitter_handle, $5),
+       category = COALESCE(category, $6),
+       chains = (SELECT COALESCE(jsonb_agg(DISTINCT c), '[]'::jsonb)
+                 FROM jsonb_array_elements_text(COALESCE(chains,'[]'::jsonb) || $7::jsonb) AS c),
+       primary_chain = COALESCE(primary_chain, $8), updated_at = now()
+     WHERE id = $1`,
+    [id, input.surfId || null, input.symbol || null, normalizeDomain(input.website), normalizeTwitter(input.twitter),
+      input.category || null, JSON.stringify(chains), chains[0] || null],
+  )
+  return id
+}
+
+// 身份确认程度：confirmed（有 Surf ID 或合约）/ partial（有官网或 X 账号）/ name_only
+async function identityStatus(projectIds) {
+  if (!projectIds.length) return {}
+  const rows = await db.query(
+    `SELECT project_id, array_agg(DISTINCT id_type) AS types FROM wr_project_ids WHERE project_id = ANY($1) GROUP BY project_id`,
+    [projectIds],
+  )
+  const out = {}
+  for (const r of rows) {
+    const t = new Set(r.types)
+    out[r.project_id] = t.has('surf_id') || t.has('contract') ? 'confirmed' : t.has('domain') || t.has('twitter') ? 'partial' : 'name_only'
+  }
+  return out
 }
 
 module.exports = {
-  upsertProject, mergeProjects, decideRelation, resolveMerged,
-  normalizeDomain, normalizeTwitter, normalizeContract, normalizeChain, buildIdentifiers, PROJECT_REF_TABLES,
+  upsertProject, attachIdentity, mergeProjects, decideRelation, resolveMerged, identityStatus,
+  normalizeDomain, normalizeTwitter, normalizeContract, normalizeChain, normalizeName, buildIdentifiers,
+  PROJECT_REF_TABLES, PROJECT_REF_EXEMPT, MERGE_RULE_VERSION,
 }

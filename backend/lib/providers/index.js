@@ -11,8 +11,9 @@ const rest = require('./rest')
 
 const ADAPTERS = { surf, helius, ...rest }
 
+// scope: global（月/日预算、额度保护线）或 project（单项目累计上限）
 class BudgetBlockedError extends Error {
-  constructor(reason) { super(reason); this.blocked = true }
+  constructor(reason, scope = 'global') { super(reason); this.blocked = true; this.scope = scope }
 }
 
 function stable(obj) {
@@ -80,7 +81,7 @@ async function call(opts) {
   const verdict = await budget.check({ provider, trigger, priority, projectId, estCost })
   if (!verdict.allowed) {
     await logUsage({ ...base, status: 'blocked', credits: 0, estCost, error: verdict.reason })
-    throw new BudgetBlockedError(verdict.reason)
+    throw new BudgetBlockedError(verdict.reason, verdict.scope || 'global')
   }
 
   // 3. 限速 + 4. 请求（退避重试）

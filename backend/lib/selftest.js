@@ -197,6 +197,16 @@ async function runSelftest() {
     await db.query('DELETE FROM wr_projects WHERE id = $1', [tmpProjectId])
   }
 
+  await step(results, '数据', '合并迁移覆盖所有引用项目的表', async () => {
+    const { PROJECT_REF_TABLES, PROJECT_REF_EXEMPT } = require('./identity')
+    const rows = await db.query(
+      `SELECT table_name FROM information_schema.columns
+       WHERE table_schema = 'public' AND column_name = 'project_id' AND table_name LIKE 'wr\\_%'`)
+    const all = rows.map((r) => r.table_name)
+    const missing = all.filter((t) => !PROJECT_REF_TABLES.includes(t) && !PROJECT_REF_EXEMPT.includes(t))
+    assert(missing.length === 0, `以下表含 project_id 但合并时不会迁移：${missing.join(', ')}`)
+    return `${all.length} 张表含 project_id，均已纳入合并迁移或明确豁免`
+  })
   await step(results, '数据', '超出预算的请求会被拦截', async () => {
     try {
       await call({ provider: 'surf', endpoint: 'search/project', params: { q: 'budget-guard-test' }, trigger, task, estCost: 1e9 })

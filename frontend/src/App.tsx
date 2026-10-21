@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react'
 import SystemPage from './pages/SystemPage'
+import RadarPage from './pages/RadarPage'
 
 type PageKey = 'radar' | 'projects' | 'tge' | 'workbench' | 'alerts' | 'system'
 
 const NAV: { key: PageKey; label: string; milestone?: string }[] = [
-  { key: 'radar', label: '项目雷达', milestone: 'M1' },
+  { key: 'radar', label: '项目雷达' },
   { key: 'projects', label: '项目池', milestone: 'M2' },
   { key: 'tge', label: 'TGE / 解锁', milestone: 'M4' },
   { key: 'workbench', label: '研究工作台', milestone: 'M5' },
@@ -14,11 +15,11 @@ const NAV: { key: PageKey; label: string; milestone?: string }[] = [
 
 function readHash(): PageKey {
   const k = window.location.hash.replace('#/', '') as PageKey
-  return NAV.some((n) => n.key === k) ? k : 'system'
+  return NAV.some((n) => n.key === k) ? k : 'radar'
 }
 
 export default function App() {
-  const [page, setPage] = useState<PageKey>('system')
+  const [page, setPage] = useState<PageKey>('radar')
 
   useEffect(() => {
     setPage(readHash())
@@ -60,6 +61,8 @@ export default function App() {
       <main className="flex-1 min-w-0">
         {page === 'system' ? (
           <SystemPage />
+        ) : page === 'radar' ? (
+          <RadarPage />
         ) : (
           <div className="p-8">
             <h1 className="text-xl font-bold">{current.label}</h1>

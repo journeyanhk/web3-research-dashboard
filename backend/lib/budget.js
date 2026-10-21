@@ -72,7 +72,7 @@ async function check({ provider, trigger, priority = 'normal', projectId, estCos
           await raiseAlert({ category: 'budget', type: 'project_budget_exceeded', severity: 'warn', projectId,
             title: `${p.name} 已达到当前阶段的点数上限`, detail: { spent: Number(p.credits_spent), cap: capVal, level: p.coverage_level },
             dedupeKey: `proj_cap_${projectId}_${p.coverage_level}` })
-          return { allowed: false, reason: `项目已用 ${p.credits_spent}/${capVal} 点（${p.coverage_level}）` }
+          return { allowed: false, scope: 'project', reason: `项目已用 ${p.credits_spent}/${capVal} 点（${p.coverage_level}）` }
         }
       }
     }

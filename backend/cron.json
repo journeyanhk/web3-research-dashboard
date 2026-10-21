@@ -1,0 +1,10 @@
+[
+  {
+    "id": "discovery-daily",
+    "name": "每日全局发现采集（融资/空投/上币/新闻 + 身份确认）",
+    "schedule": "17 1 * * *",
+    "handler": "jobs/discovery.js",
+    "enabled": true,
+    "timeout": 900
+  }
+]
