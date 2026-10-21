@@ -105,9 +105,21 @@ Surf 查不到详情（404）的项目：30 天内不再请求；期间出现新
 - 自动采集每天最多成功一次；跳过时不发任何请求
 - `wr_job_runs.instance` 记录运行环境（默认主机名，可用 `WR_INSTANCE` 指定）
 
-## 环境变量
+## 环境变量与密钥
 
-见 `backend/.env.example`。本地开发放在 `backend/.env.local`（已被 .gitignore 排除）。
+优先级：环境变量 > `backend/.env.local`（开发）> `backend/secrets/runtime.json`（随发布包部署）。
+
+- **Surf 发布会剔除所有 `.env*` 文件**，生产环境的密钥放在 `backend/secrets/runtime.json`（格式见 `backend/secrets/README.md`）。
+  该文件被 .gitignore 排除、不进 GitHub，但会被打进 Surf 发布包。只放生产需要的：数据库、Helius、登录密码、令牌密钥。
+- 变量清单见 `backend/.env.example`。
+
+## 定时采集（内置调度）
+
+Surf 发布时只有开启 enable_cron 才保留 `cron.json`，生产实例也可能闲置休眠，所以采用内置调度（`lib/scheduler.js`）：
+- 北京时间 09:17（01:17 UTC）之后，每 10 分钟检查一次；进程启动 90 秒后检查一次；打开雷达页时检查一次
+- 今天已成功自动采集则跳过；每天自动尝试最多 3 次；租约锁保证预览与生产不会同时采集
+- 被重启 / 休眠打断超过 30 分钟的运行记为 abandoned
+- `WR_SCHEDULER=off` 可关闭
 
 ## 点数规则
 
@@ -137,6 +149,7 @@ Surf 查不到详情（404）的项目：30 天内不再请求；期间出现新
 - [x] M1.1 名称歧义修正 + 数据质量边界测试
 - [x] M2 项目池与状态流转
 - [x] M2.1 项目池筛选修复、登录保护、采集并发锁、数据新鲜度、产品证据分层
+- [x] M2.2 发布修复：生产密钥（secrets/runtime.json）、内置每日调度
 - [ ] M3 全自动评分
 - [ ] M4 TGE / 解锁 + SOL 外部数据 + Robinhood Chain
 - [ ] M5 研究工作台

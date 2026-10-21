@@ -1,4 +1,5 @@
 // Surf 数据接口适配器
+require('../config') // 确保 SURF_API_KEY 已从密钥文件注入（生产环境）
 const { dataApi } = require('@surf-ai/sdk/server')
 const { HttpError } = require('../http')
 

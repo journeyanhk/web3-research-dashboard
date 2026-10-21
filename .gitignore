@@ -7,9 +7,14 @@ dist/
 .env
 .env.*
 !.env.example
+backend/secrets/*
+!backend/secrets/README.md
 
 # 平台/会话文件
 .vulcan/
 .claude/
 uploads/
 frontend/.vulcan-error-reporter.js
+
+# Surf 发布包（会包含 uploads/ 与 secrets/，绝不提交）
+outputs/

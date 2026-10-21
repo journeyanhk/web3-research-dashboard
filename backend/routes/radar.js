@@ -9,6 +9,11 @@ const registry = require('../lib/registry')
 const { identityStatus } = require('../lib/identity')
 const { runDiscovery, isRunning, CORE_CHAINS } = require('../lib/collect/discovery')
 
+const scheduler = require('../lib/scheduler')
+
+// 路由模块在预览与生产环境都会被加载 → 在这里启动内置调度
+scheduler.start()
+
 const router = Router()
 // 所有接口需要登录（见 lib/auth.js）
 router.use(require('../lib/auth').requireAuth)
@@ -19,12 +24,14 @@ const wrap = (fn) => (req, res) => fn(req, res).catch((e) => {
 
 const chainParam = (req) => (CORE_CHAINS.includes(req.query.chain) ? req.query.chain : null)
 
+// 下次自动采集时间：以内置调度为准（01:17 UTC 每天）；cron.json 在生产环境可能被平台删除
 function nextCronRun() {
+  let cronJson = false
   try {
     const tasks = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'cron.json'), 'utf8'))
-    const t = tasks.find((x) => x.id === 'discovery-daily' && x.enabled)
-    return t ? { schedule: t.schedule, next_run_at: new Cron(t.schedule).nextRun()?.toISOString() || null } : null
-  } catch { return null }
+    cronJson = tasks.some((x) => x.id === 'discovery-daily' && x.enabled)
+  } catch { /* 生产环境可能没有 cron.json */ }
+  return { schedule: '17 1 * * *', next_run_at: new Cron('17 1 * * *').nextRun()?.toISOString() || null, cron_json: cronJson, builtin: true }
 }
 
 // 事件对应的链：事件自身识别出的链，或关联项目的链
@@ -32,6 +39,8 @@ const EVENT_CHAIN_FILTER = `($1::text IS NULL OR e.chains ? $1 OR p.chains ? $1)
 
 router.get('/overview', wrap(async (req, res) => {
   const chain = chainParam(req)
+  // 打开雷达页时顺带检查今天是否该采集（实例休眠时靠访问补跑）；后台执行，不影响页面
+  scheduler.ensureDailyRun('visit').catch(() => {})
 
   const summary = await db.one(
     `SELECT
@@ -89,7 +98,7 @@ router.get('/overview', wrap(async (req, res) => {
   res.json({
     chain,
     summary: { ...summary, open_conflicts: conflicts.c, surf_credits_today: credits.c },
-    last_run: lastRun, running: isRunning(), schedule: nextCronRun(),
+    last_run: lastRun, running: isRunning(), schedule: nextCronRun(), scheduler: scheduler.status(),
     projects, fundraising, airdrops, listings, tge, news,
   })
 }))

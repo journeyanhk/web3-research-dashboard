@@ -10,7 +10,7 @@ const { recordMetric } = require('./metrics')
 const { secretValues, getSecret } = require('./config')
 
 const ROOT = path.join(__dirname, '..', '..')
-const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', '.vulcan', 'uploads', '.claude'])
+const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', '.vulcan', 'uploads', '.claude', 'secrets'])
 // 任何以 .env 开头的文件都不扫描（它们本来就存放密钥），但必须保证没有被 Git 跟踪
 const isEnvFile = (name) => name.startsWith('.env')
 const JUP = 'JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN' // Jupiter（SOL 真实代币，用于连通性验证）
@@ -43,7 +43,21 @@ async function runSelftest() {
   const secrets = secretValues()
 
   // ───── 安全 ─────
-  for (const [key, label] of [['SURF_API_KEY', 'Surf API Key'], ['HELIUS_API_KEY', 'Helius API Key'], ['DATABASE_URL', '数据库连接']]) {
+  await step(results, '安全', '发布包会带上运行密钥（secrets/runtime.json）', async () => {
+    // Surf 发布时剔除所有 .env* 文件；生产环境靠 secrets/runtime.json
+    const rt = path.join(ROOT, 'backend', 'secrets', 'runtime.json')
+    if (!fs.existsSync(rt)) {
+      // 生产环境里也应该存在；不存在说明发布包里缺密钥
+      throw new Error('缺少 backend/secrets/runtime.json，发布后生产环境将没有密钥')
+    }
+    const keys = Object.keys(JSON.parse(fs.readFileSync(rt, 'utf8')))
+    const need = ['DATABASE_URL', 'HELIUS_API_KEY', 'ADMIN_PASSWORD', 'AUTH_SECRET']
+    const miss = need.filter((k) => !keys.includes(k))
+    assert(miss.length === 0, `runtime.json 缺少：${miss.join(', ')}`)
+    assert(!keys.includes('GITHUB_TOKEN'), 'runtime.json 不应包含 GitHub Token')
+    return `包含 ${keys.length} 项（不含 GitHub Token）`
+  })
+  for (const [key, label] of [['SURF_API_KEY', 'Surf API Key'], ['HELIUS_API_KEY', 'Helius API Key'], ['DATABASE_URL', '数据库连接'], ['ADMIN_PASSWORD', '登录密码']]) {
     await step(results, '安全', `${label} 已配置`, async () => {
       assert(getSecret(key), `未找到 ${key}`)
       return '已配置（只在环境中）'
@@ -67,12 +81,12 @@ async function runSelftest() {
     let tracked = []
     try {
       tracked = execSync('git ls-files', { cwd: ROOT, encoding: 'utf8' }).split('\n')
-        .filter((f) => /(^|\/)\.env/.test(f) && !/\.env\.example$/.test(f))
+        .filter((f) => (/(^|\/)\.env/.test(f) && !/\.env\.example$/.test(f)) || (/^backend\/secrets\//.test(f) && !/README\.md$/.test(f)))
     } catch (e) {
       throw new Error(`无法读取 Git 跟踪文件：${e.message.slice(0, 120)}`)
     }
     assert(tracked.length === 0, `以下密钥文件被 Git 跟踪：${tracked.join(', ')}`)
-    return '.env / .env.* 均未被跟踪（仅 .env.example）'
+    return '.env / .env.* / secrets/runtime.json 均未被跟踪'
   })
   await step(results, '安全', '调用记录与原始存档中不包含密钥', async () => {
     let n = 0
