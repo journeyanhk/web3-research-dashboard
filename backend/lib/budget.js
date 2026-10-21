@@ -49,9 +49,9 @@ async function heliusStatus() {
  * 调用前检查。返回 { allowed, reason }
  * ctx: { provider, trigger, priority, projectId, estCost }
  */
-async function check({ provider, trigger, priority = 'normal', projectId, estCost = 1 }) {
+async function check({ provider, trigger, priority = 'normal', projectId, estCost = 1, silent = false }) {
   // 自检触发的拦截不写告警，避免误报
-  const raiseAlert = trigger === 'selftest' ? async () => null : raiseAlertReal
+  const raiseAlert = trigger === 'selftest' || silent ? async () => null : raiseAlertReal
   if (provider === 'surf') {
     const s = await surfStatus()
     if (s.monthUsed + estCost > s.monthly) {

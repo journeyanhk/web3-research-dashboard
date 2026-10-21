@@ -225,6 +225,9 @@ async function runSelftest() {
     return cov.join('，')
   })
 
+  // ───── 边界（M1.1）：用临时项目验证，跑完全部清理 ─────
+  await boundaryTests(results)
+
   results.push({ group: '评分', name: '三个真实项目的评分验收', ok: null, detail: '评分模块在 M3 完成后执行（ETH / SOL / Robinhood Chain 各一个）' })
 
   const summary = {
@@ -235,6 +238,95 @@ async function runSelftest() {
   }
   await registry.set('setting', 'last_selftest', summary)
   return summary
+}
+
+async function boundaryTests(results) {
+  const { _internal: D, DEFAULT_CONFIG } = require('./collect/discovery')
+  const budget = require('./budget')
+  const tag = `wrst${Date.now()}`
+  const name = `WR自检同名项目${tag}`
+  const norm = require('./identity').normalizeName(name)
+  const tmp = []
+  const newCtx = () => ({ trigger: 'selftest', cfg: DEFAULT_CONFIG, resolveLeft: 0, budgetBlocked: null,
+    stats: { identity: { searched: 0, errors: 0 } }, touched: new Set() })
+  const mkProject = async () => {
+    const r = await db.one(`INSERT INTO wr_projects (name, discovery_source) VALUES ($1, 'selftest_tmp') RETURNING id`, [name])
+    await db.query(`INSERT INTO wr_project_ids (project_id, id_type, id_value, source) VALUES ($1, 'name', $2, 'selftest_tmp')`, [r.id, norm])
+    tmp.push(r.id)
+    return r.id
+  }
+  try {
+    const p1 = await mkProject()
+    await step(results, '边界', '唯一同名项目 → 关联但只算低置信度', async () => {
+      const l = await D.resolveByName(newCtx(), name, [], 'selftest_tmp', { search: false })
+      assert(l.projectId === p1 && l.method === 'name' && l.confidence === 'low', `结果不符：${JSON.stringify(l)}`)
+      return `关联到 #${p1}，方式「仅名称」，置信度低`
+    })
+    const p2 = await mkProject()
+    await step(results, '边界', '多个同名且都无强身份 → 不自动关联', async () => {
+      const l = await D.resolveByName(newCtx(), name, [], 'selftest_tmp', { search: false })
+      assert(l.projectId == null && l.method === 'name_ambiguous', `被自动关联了：${JSON.stringify(l)}`)
+      assert(l.evidence?.candidate_projects?.length === 2, '证据中缺少候选项目')
+      const u = await require('./identity').upsertProject({ name, source: 'selftest_tmp' })
+      assert(u.id == null && u.linkedBy === 'name_ambiguous', 'upsertProject 仍默认选了最早的项目')
+      return `进入名称歧义队列，候选 #${p1}、#${p2}；没有默认选最早的项目`
+    })
+    await step(results, '边界', '多个同名中唯一有强身份 → 关联它（中置信度）', async () => {
+      await db.query(`INSERT INTO wr_project_ids (project_id, id_type, id_value, source) VALUES ($1, 'surf_id', $2, 'selftest_tmp')`, [p2, `${tag}-surf`])
+      const l = await D.resolveByName(newCtx(), name, [], 'selftest_tmp', { search: false })
+      assert(l.projectId === p2 && l.method === 'name_disambiguated' && l.confidence === 'medium', `结果不符：${JSON.stringify(l)}`)
+      assert(l.evidence?.selection_reason, '缺少选择理由')
+      return `关联到有 Surf ID 的 #${p2}，并记录选择理由`
+    })
+    await step(results, '边界', '同一事件重复采集不会重复入库', async () => {
+      const a = await D.insertEvent({ type: 'fundraising', externalId: `${tag}-dup`, title: 'selftest' })
+      const b = await D.insertEvent({ type: 'fundraising', externalId: `${tag}-dup`, title: 'selftest' })
+      assert(a && b == null, '重复事件被再次写入')
+      return '第二次写入被忽略'
+    })
+    await step(results, '边界', '新闻水位只前进不后退', async () => {
+      assert(D.nextWatermark(200, 100) === 200 && D.nextWatermark(100, 300) === 300 && D.nextWatermark(null, 0) === null, '水位计算错误')
+      return '旧水位 200 + 新数据 100 → 仍为 200'
+    })
+    await step(results, '边界', 'Surf 查不到详情后不会每天重复请求', async () => {
+      await db.query('UPDATE wr_projects SET surf_project_id = $2 WHERE id = $1', [p1, `${tag}-404`])
+      await D.markDetailNotFound(p1)
+      let c = await D.detailCandidates(100000)
+      assert(!c.some((r) => r.id === p1), '标记 404 后仍在待补全列表中')
+      const ev = await D.insertEvent({ type: 'fundraising', externalId: `${tag}-retry`, title: 'selftest' })
+      await D.linkEvent(ev, { projectId: p1, method: 'name', confidence: 'low' })
+      c = await D.detailCandidates(100000)
+      assert(c.some((r) => r.id === p1), '出现新融资事件后没有允许重试')
+      return '标记后 30 天内不再请求；出现新融资事件时允许重试一次'
+    })
+    await step(results, '边界', '全局预算拦截后不再发起请求', async () => {
+      const before = await db.one(`SELECT count(*)::int c FROM wr_api_usage WHERE task = $1`, [`${tag}-guard`])
+      const ctx = { ...newCtx(), budgetBlocked: '模拟：今日预算已用完' }
+      let blocked = false
+      try { await D.surf(ctx, 'search/project', { q: 'x' }, { task: `${tag}-guard` }) } catch (e) { blocked = e.blocked === true }
+      const after = await db.one(`SELECT count(*)::int c FROM wr_api_usage WHERE task = $1`, [`${tag}-guard`])
+      assert(blocked && after.c === before.c, '拦截后仍然发出了请求')
+      return '直接拒绝，没有产生任何调用记录'
+    })
+    await step(results, '边界', '单项目到上限只影响该项目', async () => {
+      const capSetting = (await registry.getSetting('surf_budget'))?.stage_total_caps?.discovery ?? 3
+      await db.query('UPDATE wr_projects SET credits_spent = $2 WHERE id = $1', [p1, capSetting])
+      const v1 = await budget.check({ provider: 'surf', trigger: 'auto', projectId: p1, estCost: 1, silent: true })
+      const v2 = await budget.check({ provider: 'surf', trigger: 'auto', projectId: p2, estCost: 1, silent: true })
+      assert(!v1.allowed && v1.scope === 'project', `项目 #${p1} 没有被单项目上限拦截`)
+      assert(v2.allowed || v2.scope !== 'project', `项目 #${p2} 被错误拦截`)
+      return `#${p1} 被拦截（单项目上限 ${capSetting} 点），#${p2} ${v2.allowed ? '正常放行' : `受全局限制：${v2.reason}`}`
+    })
+  } finally {
+    if (tmp.length) {
+      await db.query('DELETE FROM wr_events WHERE external_id LIKE $1 OR project_id = ANY($2)', [`${tag}%`, tmp])
+      await db.query('DELETE FROM wr_alerts WHERE project_id = ANY($1)', [tmp])
+      await db.query('DELETE FROM wr_project_relations WHERE project_a = ANY($1) OR project_b = ANY($1)', [tmp])
+      await db.query('DELETE FROM wr_projects WHERE id = ANY($1)', [tmp])
+    } else {
+      await db.query('DELETE FROM wr_events WHERE external_id LIKE $1', [`${tag}%`])
+    }
+  }
 }
 
 module.exports = { runSelftest }

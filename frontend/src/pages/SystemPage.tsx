@@ -491,6 +491,75 @@ function ConflictQueue() {
   )
 }
 
+interface AmbiguousEvent {
+  id: number
+  event_type: string
+  title?: string | null
+  candidate_name?: string | null
+  event_at?: string | null
+  url?: string | null
+  candidates: RelProject[]
+}
+
+function AmbiguityQueue() {
+  const qc = useQueryClient()
+  const { data } = useQuery({
+    queryKey: ['ambiguous-events'],
+    queryFn: () => getJson<{ data: AmbiguousEvent[] }>('projects/ambiguous-events'),
+  })
+  const link = useMutation({
+    mutationFn: ({ id, projectId }: { id: number; projectId: number | null }) => sendJson(`projects/events/${id}/link`, 'POST', { projectId }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['ambiguous-events'] })
+      qc.invalidateQueries({ queryKey: ['radar'] })
+    },
+  })
+  const rows = data?.data ?? []
+  return (
+    <Section title="名称歧义队列" desc="事件里只识别出项目名，而项目池中有多个同名项目、无法自动判断时，不会默认关联，放在这里由你选择。">
+      {rows.length === 0 ? (
+        <p className="text-sm text-fg-subtle">没有待选择的事件。</p>
+      ) : (
+        <ul className="flex flex-col">
+          {rows.map((e) => (
+            <li key={e.id} className="border-t border-border-base py-2.5 text-sm">
+              <div className="flex items-baseline justify-between gap-3">
+                <a href={e.url ?? undefined} target="_blank" rel="noreferrer" className="font-medium hover:underline underline-offset-2">
+                  {e.title ?? e.candidate_name}
+                </a>
+                <span className="text-xs text-fg-muted shrink-0">{fmtTime(e.event_at)}</span>
+              </div>
+              <div className="flex flex-wrap gap-2 mt-2">
+                {e.candidates.map((p) => (
+                  <button
+                    key={p.id}
+                    disabled={link.isPending}
+                    onClick={() => link.mutate({ id: e.id, projectId: p.id })}
+                    className="rounded-md border border-border-strong px-2.5 py-1 text-xs hover:bg-bg-subtle-hover disabled:opacity-50 text-left"
+                  >
+                    关联到 {p.name} #{p.id}
+                    <span className="text-fg-muted ml-1">
+                      {[p.website_domain, p.twitter_handle ? `@${p.twitter_handle}` : null].filter(Boolean).join(' · ')}
+                    </span>
+                  </button>
+                ))}
+                <button
+                  disabled={link.isPending}
+                  onClick={() => link.mutate({ id: e.id, projectId: null })}
+                  className="rounded-md px-2.5 py-1 text-xs text-fg-subtle hover:bg-bg-subtle-hover disabled:opacity-50"
+                >
+                  都不是
+                </button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+      {link.isError && <p className="text-xs text-destructive mt-2">{(link.error as Error).message}</p>}
+    </Section>
+  )
+}
+
 function UsageLog() {
   const { data } = useQuery({
     queryKey: ['system-usage'],
@@ -575,6 +644,7 @@ export default function SystemPage() {
           <ProvidersTable providers={data.providers} />
           <EndpointStats rows={data.budget.byEndpoint ?? []} />
           <ConflictQueue />
+          <AmbiguityQueue />
           <SelftestPanel last={data.last_selftest} />
           {data.settings.surf_budget && <BudgetSettings setting={data.settings.surf_budget} />}
           <UsageLog />

@@ -87,7 +87,10 @@ const AIRDROP_STATUS: Record<string, string> = {
   POTENTIAL: '潜在', CONFIRMED: '已确认', SNAPSHOT: '已快照', VERIFICATION: '验证中', REWARD_AVAILABLE: '可领取', DISTRIBUTED: '已发放',
 }
 const REWARD_LABEL: Record<string, string> = { airdrop: '空投', points: '积分', whitelist: '白名单', nft: 'NFT', role: '角色', ambassador: '大使' }
-const LINK_LABEL: Record<string, string> = { surf_id: 'Surf ID', name_search: '名称匹配 Surf', name: '仅名称', symbol: '代币符号', none: '未关联' }
+const LINK_LABEL: Record<string, string> = {
+  surf_id: 'Surf ID', name_search: '名称匹配 Surf', name: '仅名称', name_disambiguated: '同名中唯一有强身份',
+  name_ambiguous: '同名歧义，待选择', manual: '人工指定', manual_none: '人工确认无对应项目', symbol: '代币符号', none: '未关联',
+}
 const RUN_STATUS: Record<string, string> = { ok: '成功', partial: '部分成功', error: '失败', running: '运行中' }
 
 const fmtUsd = (n?: unknown) => {
@@ -295,6 +298,7 @@ function LinkNote({ e }: { e: RadarEvent }) {
       </span>
     )
   }
+  if (e.link_method === 'name_ambiguous') return <span className="text-[11px] text-[var(--color-tag-orange-100)]">同名歧义，待在「数据与点数」页选择</span>
   return <span className="text-[11px] text-fg-muted">未关联项目</span>
 }
 

@@ -35,4 +35,46 @@ router.post('/relations/:id/decide', wrap(async (req, res) => {
   res.json(await decideRelation(Number(req.params.id), decision))
 }))
 
+// 名称歧义队列：多个同名项目、无法自动判断的事件
+router.get('/ambiguous-events', wrap(async (_req, res) => {
+  const rows = await db.query(
+    `SELECT e.id, e.event_type, e.title, e.candidate_name, e.event_at, e.url, e.link_evidence
+     FROM wr_events e WHERE e.link_method = 'name_ambiguous' AND e.project_id IS NULL
+     ORDER BY e.event_at DESC NULLS LAST LIMIT 100`)
+  const ids = [...new Set(rows.flatMap((r) => (r.link_evidence?.candidate_projects || []).map((c) => c.id)))]
+  const projects = ids.length
+    ? await db.query(
+      `SELECT id, name, symbol, chains, website_domain, twitter_handle, surf_project_id, merged_into, first_seen_at
+       FROM wr_projects WHERE id = ANY($1)`, [ids])
+    : []
+  const byId = Object.fromEntries(projects.map((p) => [p.id, p]))
+  res.json({
+    data: rows.map((r) => ({
+      ...r,
+      candidates: (r.link_evidence?.candidate_projects || []).map((c) => byId[c.id]).filter((p) => p && !p.merged_into),
+    })),
+  })
+}))
+
+// 人工为事件指定项目（或标记为都不是）
+router.post('/events/:id/link', wrap(async (req, res) => {
+  const eventId = Number(req.params.id)
+  const projectId = req.body?.projectId == null ? null : Number(req.body.projectId)
+  const ev = await db.one('SELECT id, link_evidence FROM wr_events WHERE id = $1', [eventId])
+  if (!ev) return res.status(404).json({ error: '事件不存在' })
+  const evidence = { ...(ev.link_evidence || {}), manual_decision: projectId ? { selected_project: projectId } : { none_of_candidates: true }, decided_at: new Date().toISOString() }
+  if (projectId) {
+    const p = await db.one('SELECT id FROM wr_projects WHERE id = $1 AND merged_into IS NULL', [projectId])
+    if (!p) return res.status(400).json({ error: '项目不存在或已合并' })
+    await db.query(
+      `UPDATE wr_events SET project_id = $2, link_method = 'manual', link_confidence = 'high', link_evidence = $3 WHERE id = $1`,
+      [eventId, projectId, JSON.stringify(evidence)])
+  } else {
+    await db.query(
+      `UPDATE wr_events SET link_method = 'manual_none', link_confidence = 'none', link_evidence = $2 WHERE id = $1`,
+      [eventId, JSON.stringify(evidence)])
+  }
+  res.json({ ok: true })
+}))
+
 module.exports = router

@@ -28,13 +28,18 @@ const nums = migs.map((f) => Number(f.split('_')[0]))
 const gap = nums.some((n, i) => n !== i + 1)
 if (gap) fail(`迁移编号不连续：${migs.join(', ')}`); else ok(`迁移文件 ${migs.length} 个，编号连续`)
 
+// 纯静态：只读文件文本检查导出结构，不 require（不依赖 node_modules / 数据库）
 try {
   const cron = JSON.parse(fs.readFileSync(path.join(ROOT, 'cron.json'), 'utf8'))
   for (const t of cron) {
-    if (!fs.existsSync(path.join(ROOT, t.handler))) fail(`cron 任务 ${t.id} 的 handler 不存在：${t.handler}`)
-    else if (typeof require(path.join(ROOT, t.handler)).handler !== 'function') fail(`cron 任务 ${t.id} 未导出 handler`)
+    for (const k of ['id', 'name', 'schedule', 'handler']) if (!t[k]) fail(`cron 任务缺少字段 ${k}：${JSON.stringify(t)}`)
+    if (t.schedule && t.schedule.trim().split(/\s+/).length !== 5) fail(`cron 任务 ${t.id} 的 schedule 不是 5 段：${t.schedule}`)
+    const f = path.join(ROOT, t.handler || '')
+    if (!fs.existsSync(f)) { fail(`cron 任务 ${t.id} 的 handler 不存在：${t.handler}`); continue }
+    const src = fs.readFileSync(f, 'utf8')
+    if (!/module\.exports\s*=\s*\{[^}]*\bhandler\b/.test(src) && !/exports\.handler\s*=/.test(src)) fail(`cron 任务 ${t.id} 未导出 handler`)
   }
-  ok(`cron.json ${cron.length} 个任务`)
+  ok(`cron.json ${cron.length} 个任务（字段、路径、导出结构）`)
 } catch (e) { fail(`cron.json 解析失败：${e.message}`) }
 
 if (failed) { console.error(`\n${failed} 项失败`); process.exit(1) }

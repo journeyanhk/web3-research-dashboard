@@ -287,13 +287,20 @@ async function upsertProject(input) {
   const { strong, weak } = classifyMatches(rows)
   // 本次输入同时带了域名和 X 账号时，分别命中两个项目也不算强匹配（各自只命中一项）
 
-  // 只有名称的输入：命中同名项目就直接挂过去（多个同名时取最早的），不新建、不入队
+  // 只有名称的输入（M1.1）：
+  //   唯一同名 → 挂过去；多个同名中唯一有强身份 → 挂到它；否则不做选择，返回 ambiguous 交给调用方（不新建、不默认取最早）
   const nameOnly = ids.length > 0 && ids.every(([t]) => t === 'name')
   if (nameOnly && strong.length === 0) {
     const sameName = weak.filter((w) => w.types.includes('name')).map((w) => w.projectId).sort((a, b) => a - b)
-    if (sameName.length) {
+    if (sameName.length === 1) {
       await db.query('UPDATE wr_projects SET updated_at = now() WHERE id = $1', [sameName[0]])
       return { id: sameName[0], created: false, merged: [], possibleDuplicates: [], linkedBy: 'name' }
+    }
+    if (sameName.length > 1) {
+      const st = await db.query(
+        `SELECT DISTINCT project_id FROM wr_project_ids WHERE project_id = ANY($1) AND id_type IN ('surf_id','contract')`, [sameName])
+      if (st.length === 1) return { id: st[0].project_id, created: false, merged: [], possibleDuplicates: [], linkedBy: 'name_disambiguated' }
+      return { id: null, created: false, merged: [], possibleDuplicates: [], linkedBy: 'name_ambiguous', ambiguous: sameName }
     }
   }
 
