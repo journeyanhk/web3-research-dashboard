@@ -317,8 +317,55 @@ async function boundaryTests(results) {
       assert(v2.allowed || v2.scope !== 'project', `项目 #${p2} 被错误拦截`)
       return `#${p1} 被拦截（单项目上限 ${capSetting} 点），#${p2} ${v2.allowed ? '正常放行' : `受全局限制：${v2.reason}`}`
     })
+    // ───── 漏斗（M2）─────
+    const pipeline = require('./pipeline')
+    const base = (o = {}) => ({
+      identity: 'confirmed', conflict: false,
+      hard: { credible_funding: false, verifiable_product: false, token_plan: false, onchain_activity: null, ecosystem_integration: null },
+      bonus: { core_chain: false, multi_source: false, active_campaign: false, social_traction: false },
+      completeness: {}, origins: {}, ...o,
+    })
+    await step(results, '漏斗', '证据只来自空投一个来源 → 不进初筛', async () => {
+      const d = pipeline.decideStage(base({
+        hard: { ...base().hard, verifiable_product: true }, bonus: { ...base().bonus, active_campaign: true },
+        origins: { verifiable_product: ['airdrop'], active_campaign: ['airdrop'] },
+      }))
+      assert(d.stage === 'pending_verify', `进入了 ${d.stage}`)
+      return `→ 待验证：${d.reason}`
+    })
+    await step(results, '漏斗', '硬条件 + 加分且 2 个独立来源 → 初筛', async () => {
+      const d = pipeline.decideStage(base({
+        hard: { ...base().hard, credible_funding: true }, bonus: { ...base().bonus, core_chain: true },
+        origins: { credible_funding: ['fundraising'], core_chain: ['detail'] },
+      }))
+      assert(d.stage === 'screening', `进入了 ${d.stage}`)
+      return '→ 初筛'
+    })
+    await step(results, '漏斗', '身份只有名称 → 数据待补全；有冲突 → 数据冲突', async () => {
+      const full = { hard: { ...base().hard, credible_funding: true }, bonus: { ...base().bonus, core_chain: true },
+        origins: { credible_funding: ['fundraising'], core_chain: ['detail'] } }
+      const a = pipeline.decideStage(base({ ...full, identity: 'name_only' }))
+      const b = pipeline.decideStage(base({ ...full, conflict: true }))
+      assert(a.stage === 'data_incomplete' && b.stage === 'data_conflict', `结果：${a.stage} / ${b.stage}`)
+      return '条件都满足时，仅名称 → 数据待补全，有冲突 → 数据冲突'
+    })
+    await step(results, '漏斗', '人工设定的阶段不会被自动评估改掉', async () => {
+      await pipeline.setStageManual(p1, 'watch', '自检：人工设为重点观察')
+      await pipeline.evaluateProjects([p1])
+      const r = await db.one('SELECT stage, stage_source, coverage_level FROM wr_projects WHERE id = $1', [p1])
+      assert(r.stage === 'watch' && r.stage_source === 'manual', `被改成了 ${r.stage}`)
+      assert(r.coverage_level === 'deep_research', '预算层级没有随阶段更新')
+      const h = await db.one('SELECT count(*)::int c FROM wr_stage_history WHERE project_id = $1', [p1])
+      assert(h.c >= 1, '没有记录阶段历史')
+      await pipeline.restoreAuto(p1)
+      const r2 = await db.one('SELECT stage_source FROM wr_projects WHERE id = $1', [p1])
+      assert(r2.stage_source === 'auto', '恢复自动失败')
+      return '评估后仍为「重点观察」，预算层级同步为深度尽调；恢复自动后交还规则'
+    })
   } finally {
     if (tmp.length) {
+      await db.query('DELETE FROM wr_stage_history WHERE project_id = ANY($1)', [tmp])
+      await db.query('DELETE FROM wr_notes WHERE project_id = ANY($1)', [tmp])
       await db.query('DELETE FROM wr_events WHERE external_id LIKE $1 OR project_id = ANY($2)', [`${tag}%`, tmp])
       await db.query('DELETE FROM wr_alerts WHERE project_id = ANY($1)', [tmp])
       await db.query('DELETE FROM wr_project_relations WHERE project_a = ANY($1) OR project_b = ANY($1)', [tmp])

@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { getJson, sendJson, fmtNum, fmtTime } from '@/lib/fetcher'
+import { STAGE_LABEL } from '@/lib/labels'
 
 // ───────── 类型 ─────────
 interface RadarProject {
@@ -65,6 +66,7 @@ interface Quality {
   daily: { day: string; actual: number; estimated: number; cached: number; calls: number; errors: number }[]
   providerFail: { provider: string; calls: number; errors: number }[]
   runs: { id: number; trigger: string; status: string; started_at: string; finished_at?: string | null; credits?: string | null }[]
+  screening?: { projects: number; credits: number; per_100: number | null }
 }
 
 // ───────── 文案 ─────────
@@ -82,7 +84,7 @@ const ID_LABEL: Record<string, { text: string; cls: string; tip: string }> = {
   name_only: { text: '仅名称', cls: 'text-[var(--color-tag-orange-100)]', tip: '只从标题识别出名称，身份未确认' },
 }
 const TGE_LABEL: Record<string, string> = { pre: 'TGE 前', upcoming: '即将 TGE', post: '已 TGE' }
-const STAGE_LABEL: Record<string, string> = { discovered: '发现', merged: '已合并' }
+
 const AIRDROP_STATUS: Record<string, string> = {
   POTENTIAL: '潜在', CONFIRMED: '已确认', SNAPSHOT: '已快照', VERIFICATION: '验证中', REWARD_AVAILABLE: '可领取', DISTRIBUTED: '已发放',
 }
@@ -257,7 +259,8 @@ function ProjectsTable({ rows }: { rows: RadarProject[] }) {
               {rows.map((p) => {
                 const id = ID_LABEL[p.identity_status] ?? ID_LABEL.name_only
                 return (
-                  <tr key={p.id} className="border-t border-border-base align-top">
+                  <tr key={p.id} className="border-t border-border-base align-top hover:bg-bg-subtle-hover cursor-pointer"
+                    onClick={() => { window.location.hash = `#/projects/${p.id}` }}>
                     <td className="py-2 pr-3">
                       <div className="font-medium">
                         {p.name}
@@ -501,7 +504,10 @@ function QualityPanel() {
             </div>
             <div>
               <div className="text-xs text-fg-subtle">每 100 点产出初筛项目</div>
-              <div className="font-semibold mt-1 text-fg-muted">M2 后可用</div>
+              <div className="font-semibold tabular-nums mt-1">
+                {data.screening?.per_100 != null ? fmtNum(data.screening.per_100, 1) : '—'}
+                <span className="text-[11px] text-fg-muted font-normal ml-1">（{data.screening?.projects ?? 0} 个）</span>
+              </div>
             </div>
           </div>
         </div>

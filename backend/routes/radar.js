@@ -129,7 +129,18 @@ router.get('/quality', wrap(async (_req, res) => {
   const runs = await db.query(
     `SELECT id, trigger, status, started_at, finished_at, stats->>'surf_credits' AS credits
      FROM wr_job_runs WHERE job = 'discovery' ORDER BY id DESC LIMIT 10`)
-  res.json({ byType, projects, relations: rel, identity: idDist, daily, providerFail, runs })
+  // 每 100 点产出的初筛项目：近 7 天新发现、目前处于初筛及之后阶段（不含淘汰）的项目数 / 近 7 天采集点数 × 100
+  const screened = await db.one(
+    `SELECT count(*)::int c FROM wr_projects WHERE merged_into IS NULL AND first_seen_at >= now() - interval '7 days'
+       AND stage IN ('screening','deep_research','watch','tge_plan','tge_exec','holding')`)
+  const credits7d = daily.reduce((a, d) => a + Number(d.actual || 0), 0)
+  const funnel = await db.query(
+    `SELECT stage, count(*)::int c FROM wr_projects WHERE merged_into IS NULL GROUP BY 1`)
+  res.json({
+    byType, projects, relations: rel, identity: idDist, daily, providerFail, runs,
+    screening: { projects: screened.c, credits: credits7d, per_100: credits7d ? +(screened.c / credits7d * 100).toFixed(1) : null },
+    funnel: Object.fromEntries(funnel.map((f) => [f.stage, f.c])),
+  })
 }))
 
 router.post('/run', wrap(async (_req, res) => {

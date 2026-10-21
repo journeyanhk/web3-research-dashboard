@@ -11,7 +11,7 @@ const EVM_CHAINS = new Set(['ethereum', 'bsc', 'base', 'arbitrum', 'robinhood', 
 const STRONG_TYPES = new Set(['surf_id', 'contract'])
 
 // 引用 project_id 的表：合并时统一迁移。后续里程碑新增的表（事件、评分、快照…）需要加到这里。
-const PROJECT_REF_TABLES = ['wr_metrics', 'wr_alerts', 'wr_api_usage', 'wr_events']
+const PROJECT_REF_TABLES = ['wr_metrics', 'wr_alerts', 'wr_api_usage', 'wr_events', 'wr_stage_history', 'wr_notes']
 // 不需要迁移的表：身份标识单独处理；关系表本身记录合并历史
 const PROJECT_REF_EXEMPT = ['wr_project_ids', 'wr_project_relations']
 
