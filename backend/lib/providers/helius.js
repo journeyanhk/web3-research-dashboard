@@ -19,7 +19,7 @@ module.exports = {
   costOf,
   minIntervalMs: (endpoint) => (DAS_METHODS.has(endpoint) ? 550 : 110), // DAS 2 次/秒，RPC 10 次/秒
   bucket: (endpoint) => (DAS_METHODS.has(endpoint) ? 'helius_das' : 'helius_rpc'),
-  estimate: ({ endpoint }) => costOf(endpoint),
+  estimate: ({ endpoint, costTable }) => costOf(endpoint, costTable),
   async execute({ endpoint, params, costTable }) {
     const key = getSecret('HELIUS_API_KEY')
     if (!key) throw new HttpError('未配置 HELIUS_API_KEY', 401)

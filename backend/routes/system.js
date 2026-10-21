@@ -29,22 +29,33 @@ router.get('/overview', wrap(async (_req, res) => {
       count(*) FILTER (WHERE status = 'blocked' AND created_at >= now() - interval '7 days')::int AS blocked_7d,
       COALESCE(sum(rate_limited) FILTER (WHERE created_at >= now() - interval '7 days'),0)::int AS rate_limited_7d,
       COALESCE(avg(duration_ms) FILTER (WHERE status = 'ok' AND created_at >= now() - interval '7 days'),0)::int AS avg_ms_7d,
-      COALESCE(sum(credits) FILTER (WHERE created_at >= date_trunc('month', now())),0)::float AS credits_month
+      COALESCE(sum(actual_credits) FILTER (WHERE created_at >= date_trunc('month', now())),0)::float AS credits_month
     FROM wr_api_usage GROUP BY provider`)
   const byTask = await db.query(`
-    SELECT COALESCE(task,'—') AS task, trigger, COALESCE(sum(credits),0)::float AS credits, count(*)::int AS calls
+    SELECT COALESCE(task,'—') AS task, trigger, COALESCE(sum(actual_credits),0)::float AS credits, count(*)::int AS calls
     FROM wr_api_usage WHERE provider = 'surf' AND created_at >= date_trunc('month', now())
     GROUP BY 1,2 ORDER BY credits DESC LIMIT 20`)
   const daily = await db.query(`
-    SELECT to_char(date_trunc('day', created_at),'YYYY-MM-DD') AS day, provider, COALESCE(sum(credits),0)::float AS credits
+    SELECT to_char(date_trunc('day', created_at),'YYYY-MM-DD') AS day, provider, COALESCE(sum(actual_credits),0)::float AS credits
     FROM wr_api_usage WHERE created_at >= now() - interval '30 days' GROUP BY 1,2 ORDER BY 1`)
+  // 按接口统计（近 7 天）：缓存命中率、预估 vs 实际成本
+  const byEndpoint = await db.query(`
+    SELECT provider, endpoint,
+      count(*)::int AS calls,
+      count(*) FILTER (WHERE status = 'cached')::int AS cached,
+      count(*) FILTER (WHERE status = 'ok')::int AS ok,
+      count(*) FILTER (WHERE status = 'error')::int AS errors,
+      COALESCE(sum(estimated_credits) FILTER (WHERE status = 'ok'),0)::float AS est_credits,
+      COALESCE(sum(actual_credits) FILTER (WHERE status = 'ok'),0)::float AS actual_credits
+    FROM wr_api_usage WHERE created_at >= now() - interval '7 days'
+    GROUP BY 1,2 ORDER BY calls DESC LIMIT 40`)
   const openAlerts = await db.one("SELECT count(*)::int c FROM wr_alerts WHERE status = 'open'")
   const projects = await db.one('SELECT count(*)::int c FROM wr_projects')
 
   res.json({
     chains: chains.sort((a, b) => a.sort_order - b.sort_order).map((c) => ({ ...c, ...registry.chainCoverage(c, weights) })),
     providers: providers.map((p) => ({ ...p, stats: stats.find((s) => s.provider === p.key) || null })),
-    budget: { surf, helius, byTask, daily },
+    budget: { surf, helius, byTask, daily, byEndpoint },
     settings: {
       surf_budget: await registry.getSetting('surf_budget'),
       helius_budget: await registry.getSetting('helius_budget'),
@@ -60,7 +71,8 @@ router.get('/usage', wrap(async (req, res) => {
   const limit = Math.min(Number(req.query.limit) || 50, 200)
   const provider = req.query.provider || null
   const rows = await db.query(
-    `SELECT id, provider, endpoint, params, trigger, task, status, http_status, credits::float, duration_ms, attempts,
+    `SELECT id, provider, endpoint, params, trigger, task, status, http_status, actual_credits::float AS credits,
+            estimated_credits::float AS estimated_credits, duration_ms, attempts,
             rate_limited, error, raw_id, created_at
      FROM wr_api_usage WHERE ($1::text IS NULL OR provider = $1) ORDER BY id DESC LIMIT $2`,
     [provider, limit],

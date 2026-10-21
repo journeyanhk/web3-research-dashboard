@@ -26,10 +26,10 @@ const hashParams = (provider, endpoint, params) =>
 async function logUsage(u) {
   const r = await db.one(
     `INSERT INTO wr_api_usage (provider, endpoint, params, trigger, task, priority, project_id, status, http_status,
-       credits, duration_ms, attempts, rate_limited, error, raw_id)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id`,
+       actual_credits, estimated_credits, duration_ms, attempts, rate_limited, error, raw_id)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id`,
     [u.provider, u.endpoint, JSON.stringify(u.params || {}), u.trigger, u.task || null, u.priority || null,
-      u.projectId || null, u.status, u.httpStatus || null, u.credits || 0, u.durationMs || null,
+      u.projectId || null, u.status, u.httpStatus || null, u.credits || 0, u.estCost ?? null, u.durationMs || null,
       u.attempts || 1, u.rateLimited || 0, u.error ? String(u.error).slice(0, 500) : null, u.rawId || null],
   )
   return r?.id
@@ -75,11 +75,11 @@ async function call(opts) {
     }
   }
 
-  // 2. 预算检查
-  const estCost = opts.estCost ?? adapter.estimate({ endpoint, params })
+  // 2. 预算检查（预估成本：已知接口查成本表，未知接口用保守值）
+  const estCost = opts.estCost ?? adapter.estimate({ endpoint, params, costTable: prov?.cost_table })
   const verdict = await budget.check({ provider, trigger, priority, projectId, estCost })
   if (!verdict.allowed) {
-    await logUsage({ ...base, status: 'blocked', credits: 0, error: verdict.reason })
+    await logUsage({ ...base, status: 'blocked', credits: 0, estCost, error: verdict.reason })
     throw new BudgetBlockedError(verdict.reason)
   }
 
@@ -92,7 +92,7 @@ async function call(opts) {
       return adapter.execute({ endpoint, params, method, costTable: prov?.cost_table })
     })
     const rawId = await saveRaw({ provider, endpoint, hash, params, status: 'ok', httpStatus: result.status, body: result.body })
-    await logUsage({ ...base, status: 'ok', httpStatus: result.status, credits: result.credits, durationMs: Date.now() - started, attempts, rateLimited, rawId })
+    await logUsage({ ...base, status: 'ok', httpStatus: result.status, credits: result.credits, estCost, durationMs: Date.now() - started, attempts, rateLimited, rawId })
     if (projectId && result.credits > 0) {
       await db.query('UPDATE wr_projects SET credits_spent = credits_spent + $1, updated_at = now() WHERE id = $2', [result.credits, projectId])
     }
@@ -100,7 +100,7 @@ async function call(opts) {
     return { body: result.body, rawId, cached: false, credits: result.credits, provider }
   } catch (err) {
     const rawId = await saveRaw({ provider, endpoint, hash, params, status: 'error', httpStatus: err.status, body: err.body, error: err.message })
-    await logUsage({ ...base, status: 'error', httpStatus: err.status, credits: 0, durationMs: Date.now() - started,
+    await logUsage({ ...base, status: 'error', httpStatus: err.status, credits: 0, estCost, durationMs: Date.now() - started,
       attempts: err.attempts, rateLimited: err.rateLimited, error: err.message, rawId })
     await registry.patch('provider', provider, { last_error_at: new Date().toISOString(), last_error: String(err.message).slice(0, 300) })
     err.rawId = rawId

@@ -60,4 +60,22 @@ async function one(sql, params = []) {
   return rows[0] || null
 }
 
-module.exports = { query, one, ready }
+// 事务：fn(q) 内的 q(sql, params) 在同一连接上执行，出错整体回滚
+async function tx(fn) {
+  await ready()
+  const client = await getPool().connect()
+  try {
+    await client.query('BEGIN')
+    const q = async (sql, params = []) => (await client.query(sql, params)).rows || []
+    const result = await fn(q)
+    await client.query('COMMIT')
+    return result
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw e
+  } finally {
+    client.release()
+  }
+}
+
+module.exports = { query, one, ready, tx }

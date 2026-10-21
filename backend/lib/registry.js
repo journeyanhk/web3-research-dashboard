@@ -73,8 +73,16 @@ const DEFAULT_CHAINS = [
   },
 ]
 
+// Surf 已实测的单次成本（点/次，与返回条数无关）；未知接口按 _default 保守预估
+const SURF_COST_TABLE = {
+  _default: 2,
+  'search/project': 1, 'project/detail': 1, 'search/fundraising': 1, 'search/events': 1, 'search/news': 1,
+  'news/feed': 1, 'token/tokenomics': 1, 'token/holders': 1, 'project/defi/metrics': 1, 'wallet/labels/batch': 1,
+  'search/airdrop': 2, 'market/tge': 2, 'search/web': 3,
+}
+
 const DEFAULT_PROVIDERS = [
-  { id: 'surf', name: 'Surf 数据', kind: 'paid', unit: '点', monthly_quota: null, rate_limit: { min_interval_ms: 150 } },
+  { id: 'surf', name: 'Surf 数据', kind: 'paid', unit: '点', monthly_quota: null, rate_limit: { min_interval_ms: 150 }, cost_table: SURF_COST_TABLE },
   {
     id: 'helius', name: 'Helius (Solana)', kind: 'free_quota', unit: 'credits', monthly_quota: 1000000,
     rate_limit: { rpc_per_sec: 10, das_per_sec: 2 },
@@ -89,7 +97,8 @@ const DEFAULT_SETTINGS = {
   surf_budget: {
     monthly: 1800, // 每月数据点数预算
     auto_ratio: 0.7, // 自动任务可用的日预算比例，剩余留给手动和突发
-    stage_caps: { discovery: 3, screening: 8, deep_research: 30, tge_watch_extra: 15 }, // 单项目全程上限（累计）
+    // 单项目全程累计上限（不是每阶段新增额度）
+    stage_total_caps: { discovery: 3, screening: 8, deep_research: 30, tge_watch: 45 },
   },
   helius_budget: { warn: 0.7, pause_nonessential: 0.85, manual_only: 0.95, stop: 1.0 },
   coverage_weights: DEFAULT_COVERAGE_WEIGHTS,
@@ -104,9 +113,26 @@ function ensureSeeded() {
       for (const c of DEFAULT_CHAINS) await insertIfMissing('chain', c.id, c)
       for (const p of DEFAULT_PROVIDERS) await insertIfMissing('provider', p.id, p)
       for (const [k, v] of Object.entries(DEFAULT_SETTINGS)) await insertIfMissing('setting', k, v)
+      await upgradeRegistry()
     })().catch((e) => { seeded = null; throw e })
   }
   return seeded
+}
+
+// 已存在的旧配置升级到新结构（只补缺、不覆盖用户改过的值）
+async function upgradeRegistry() {
+  const sb = await db.one("SELECT value FROM wr_registry WHERE kind='setting' AND key='surf_budget'")
+  if (sb?.value?.stage_caps && !sb.value.stage_total_caps) {
+    const c = sb.value.stage_caps
+    const { stage_caps: _old, ...rest } = sb.value
+    const next = { ...rest, stage_total_caps: {
+      discovery: c.discovery, screening: c.screening, deep_research: c.deep_research,
+      tge_watch: Number(c.deep_research) + Number(c.tge_watch_extra ?? 15),
+    } }
+    await set('setting', 'surf_budget', next)
+  }
+  const surf = await db.one("SELECT value FROM wr_registry WHERE kind='provider' AND key='surf'")
+  if (surf && !surf.value.cost_table) await patch('provider', 'surf', { cost_table: SURF_COST_TABLE })
 }
 
 async function insertIfMissing(kind, key, value) {

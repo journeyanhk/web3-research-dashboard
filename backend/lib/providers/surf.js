@@ -12,7 +12,8 @@ function toHttpError(e) {
 module.exports = {
   id: 'surf',
   minIntervalMs: () => 150,
-  estimate: () => 2, // 调用前的保守估计；实际按返回的 credits_used 记账
+  // 调用前预估：已知接口查成本表（可在注册表中调整），未知接口按保守值；实际按返回的 credits_used 记账
+  estimate: ({ endpoint, costTable }) => Number(costTable?.[endpoint] ?? costTable?._default ?? 2),
   async execute({ endpoint, params, method }) {
     try {
       const body = method === 'POST' ? await dataApi.post(endpoint, params) : await dataApi.get(endpoint, params)

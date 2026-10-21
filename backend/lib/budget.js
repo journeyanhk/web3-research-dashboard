@@ -5,7 +5,7 @@ const { raiseAlert: raiseAlertReal } = require('./alerts')
 
 async function sumCredits(provider, where = '', params = []) {
   const r = await db.one(
-    `SELECT COALESCE(SUM(credits),0)::float AS s FROM wr_api_usage
+    `SELECT COALESCE(SUM(actual_credits),0)::float AS s FROM wr_api_usage
      WHERE provider = $1 AND status IN ('ok','error') ${where}`,
     [provider, ...params],
   )
@@ -21,13 +21,14 @@ async function surfStatus() {
   const todayAuto = await sumCredits('surf', `${todayWhere} AND trigger = 'auto'`)
   const todayAll = await sumCredits('surf', todayWhere)
   const dailyAutoCap = +((cfg.monthly / 30) * cfg.auto_ratio).toFixed(1)
-  return { monthly: cfg.monthly, monthUsed, todayAuto, todayAll, dailyAutoCap, autoRatio: cfg.auto_ratio, stageCaps: cfg.stage_caps }
+  return { monthly: cfg.monthly, monthUsed, todayAuto, todayAll, dailyAutoCap, autoRatio: cfg.auto_ratio, stageTotalCaps: cfg.stage_total_caps }
 }
 
 const STAGE_ORDER = ['discovery', 'screening', 'deep_research', 'tge_watch']
-function projectCap(stageCaps, level) {
-  if (level === 'tge_watch') return stageCaps.deep_research + stageCaps.tge_watch_extra
-  return stageCaps[level] ?? stageCaps.discovery
+// 单项目「全程累计」上限：项目从发现起累计消耗的点数，不得超过其当前阶段对应的累计值
+// （例：discovery 3 → screening 8 → deep_research 30 → tge_watch 45，升级后不会额外叠加）
+function projectCap(stageTotalCaps, level) {
+  return Number(stageTotalCaps?.[level] ?? stageTotalCaps?.discovery ?? 3)
 }
 
 async function heliusStatus() {
@@ -66,7 +67,7 @@ async function check({ provider, trigger, priority = 'normal', projectId, estCos
     if (trigger === 'auto' && projectId) {
       const p = await db.one('SELECT credits_spent, coverage_level, name FROM wr_projects WHERE id = $1', [projectId])
       if (p) {
-        const capVal = projectCap(s.stageCaps, p.coverage_level)
+        const capVal = projectCap(s.stageTotalCaps, p.coverage_level)
         if (Number(p.credits_spent) + estCost > capVal) {
           await raiseAlert({ category: 'budget', type: 'project_budget_exceeded', severity: 'warn', projectId,
             title: `${p.name} 已达到当前阶段的点数上限`, detail: { spent: Number(p.credits_spent), cap: capVal, level: p.coverage_level },

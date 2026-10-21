@@ -38,11 +38,14 @@ interface SurfBudget { monthly: number; monthUsed: number; todayAuto: number; to
 interface HeliusBudget { quota: number; used: number; ratio: number; level: string }
 interface SelftestResult { group: string; name: string; ok: boolean | null; detail: string; ms?: number }
 interface Selftest { ran_at: string; passed: number; failed: number; results: SelftestResult[] }
-interface SurfBudgetSetting { monthly: number; auto_ratio: number; stage_caps: Record<string, number> }
+interface SurfBudgetSetting { monthly: number; auto_ratio: number; stage_total_caps: Record<string, number> }
+interface EndpointStat { provider: string; endpoint: string; calls: number; cached: number; ok: number; errors: number; est_credits: number; actual_credits: number }
+interface RelProject { id: number; name: string; symbol?: string | null; website_domain?: string | null; twitter_handle?: string | null; chains?: string[] | null }
+interface Relation { id: number; status: string; reason?: string | null; created_at: string; project_a: RelProject; project_b: RelProject }
 interface Overview {
   chains: Chain[]
   providers: Provider[]
-  budget: { surf: SurfBudget; helius: HeliusBudget; byTask: { task: string; trigger: string; credits: number; calls: number }[] }
+  budget: { surf: SurfBudget; helius: HeliusBudget; byTask: { task: string; trigger: string; credits: number; calls: number }[]; byEndpoint: EndpointStat[] }
   settings: { surf_budget: SurfBudgetSetting; score_version: string; robinhood_review_gate: { enabled: boolean; validity_days: number; tge_validity_days: number } }
   counts: { open_alerts: number; projects: number }
   last_selftest: Selftest | null
@@ -55,6 +58,7 @@ interface UsageRow {
   task: string | null
   status: string
   credits: number
+  estimated_credits: number | null
   duration_ms: number | null
   error: string | null
   created_at: string
@@ -269,7 +273,7 @@ function BudgetSettings({ setting }: { setting: SurfBudgetSetting }) {
   const [monthly, setMonthly] = useState(String(setting.monthly))
   const [ratio, setRatio] = useState(String(Math.round(setting.auto_ratio * 100)))
   const [caps, setCaps] = useState<Record<string, string>>(
-    Object.fromEntries(Object.entries(setting.stage_caps).map(([k, v]) => [k, String(v)])),
+    Object.fromEntries(Object.entries(setting.stage_total_caps ?? {}).map(([k, v]) => [k, String(v)])),
   )
   const save = useMutation({
     mutationFn: () =>
@@ -277,15 +281,16 @@ function BudgetSettings({ setting }: { setting: SurfBudgetSetting }) {
         value: {
           monthly: Number(monthly),
           auto_ratio: Number(ratio) / 100,
-          stage_caps: Object.fromEntries(Object.entries(caps).map(([k, v]) => [k, Number(v)])),
+          stage_total_caps: Object.fromEntries(Object.entries(caps).map(([k, v]) => [k, Number(v)])),
         },
       }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['system-overview'] }),
   })
-  const CAP_LABEL: Record<string, string> = { discovery: '发现阶段', screening: '初筛阶段', deep_research: '深度尽调', tge_watch_extra: 'TGE 前额外' }
+  const CAP_LABEL: Record<string, string> = { discovery: '发现', screening: '初筛', deep_research: '深度尽调', tge_watch: 'TGE 观察' }
+  const CAP_ORDER = ['discovery', 'screening', 'deep_research', 'tge_watch']
   const input = 'w-full rounded-md border border-border-base bg-transparent px-2.5 py-1.5 text-sm tabular-nums focus:outline-none focus:border-border-focus'
   return (
-    <Section title="预算设置" desc="自动任务每日上限 = 月预算 ÷ 30 × 自动比例。单项目上限是累计值，超过后自动任务停止为该项目补数据。">
+    <Section title="预算设置" desc="自动任务每日上限 = 月预算 ÷ 30 × 自动比例。单项目上限是从发现起的全程累计值（升级阶段不会额外叠加），超过后自动任务停止为该项目补数据。">
       <div className="grid grid-cols-2 md:grid-cols-6 gap-4">
         <label className="flex flex-col gap-1.5 text-xs text-fg-subtle">
           月预算（点）
@@ -295,9 +300,9 @@ function BudgetSettings({ setting }: { setting: SurfBudgetSetting }) {
           自动比例（%）
           <input className={input} value={ratio} onChange={(e) => setRatio(e.target.value)} inputMode="numeric" />
         </label>
-        {Object.keys(caps).map((k) => (
+        {CAP_ORDER.filter((k) => k in caps).map((k) => (
           <label key={k} className="flex flex-col gap-1.5 text-xs text-fg-subtle">
-            {CAP_LABEL[k] ?? k}上限
+            {CAP_LABEL[k] ?? k}·累计上限
             <input className={input} value={caps[k]} onChange={(e) => setCaps({ ...caps, [k]: e.target.value })} inputMode="numeric" />
           </label>
         ))}
@@ -324,13 +329,14 @@ function SelftestPanel({ last }: { last: Selftest | null }) {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['system-overview'] })
       qc.invalidateQueries({ queryKey: ['system-usage'] })
+      qc.invalidateQueries({ queryKey: ['relations'] })
     },
   })
   const data = run.data ?? last
   return (
     <Section
       title="验收自检"
-      desc="使用真实数据验证密钥安全、记账、缓存、备用源切换、项目去重和预算拦截。每次约消耗 Surf 2 点、Helius 10 credits。"
+      desc="使用真实数据验证密钥与数据库、记账与存档、缓存、备用源切换、项目去重与合并、预算拦截。临时数据会自动清理。每次约消耗 Surf 1–2 点、Helius 10 credits。"
       right={
         <button
           onClick={() => run.mutate()}
@@ -367,6 +373,124 @@ function SelftestPanel({ last }: { last: Selftest | null }) {
   )
 }
 
+function EndpointStats({ rows }: { rows: EndpointStat[] }) {
+  return (
+    <Section title="按接口统计" desc="近 7 天。缓存时间设置不合理是最容易浪费点数的地方，重点看缓存命中率和预估与实际的偏差。">
+      {rows.length === 0 ? (
+        <p className="text-sm text-fg-subtle">暂无调用记录。</p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm min-w-[720px]">
+            <thead>
+              <tr className="text-left text-xs text-fg-muted">
+                <th className="font-normal py-1.5">数据源</th>
+                <th className="font-normal py-1.5">接口</th>
+                <th className="font-normal py-1.5 text-right">调用</th>
+                <th className="font-normal py-1.5 text-right">缓存命中</th>
+                <th className="font-normal py-1.5 text-right">失败</th>
+                <th className="font-normal py-1.5 text-right">预估消耗</th>
+                <th className="font-normal py-1.5 text-right">实际消耗</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => {
+                const diff = r.actual_credits - r.est_credits
+                return (
+                  <tr key={`${r.provider}-${r.endpoint}`} className="border-t border-border-base">
+                    <td className="py-1.5">{r.provider}</td>
+                    <td className="py-1.5 font-mono text-xs">{r.endpoint}</td>
+                    <td className="py-1.5 text-right tabular-nums">{fmtNum(r.calls)}</td>
+                    <td className="py-1.5 text-right tabular-nums">{r.calls ? `${Math.round((r.cached / r.calls) * 100)}%` : '—'}</td>
+                    <td className="py-1.5 text-right tabular-nums">{fmtNum(r.errors)}</td>
+                    <td className="py-1.5 text-right tabular-nums text-fg-subtle">{fmtNum(r.est_credits, 1)}</td>
+                    <td className="py-1.5 text-right tabular-nums">
+                      {fmtNum(r.actual_credits, 1)}
+                      {Math.abs(diff) > 0.01 && (
+                        <span className="text-[11px] text-[var(--color-tag-orange-100)] ml-1">{diff > 0 ? `+${fmtNum(diff, 1)}` : fmtNum(diff, 1)}</span>
+                      )}
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Section>
+  )
+}
+
+function ProjectCell({ p }: { p: RelProject }) {
+  return (
+    <div className="min-w-0">
+      <div className="font-medium">
+        {p.name} <span className="text-fg-muted font-normal">#{p.id}</span>
+      </div>
+      <div className="text-[11px] text-fg-muted truncate">
+        {[p.website_domain, p.twitter_handle ? `@${p.twitter_handle}` : null, (p.chains ?? []).join('/') || null].filter(Boolean).join(' · ') || '—'}
+      </div>
+    </div>
+  )
+}
+
+function ConflictQueue() {
+  const qc = useQueryClient()
+  const { data } = useQuery({
+    queryKey: ['relations', 'possible_duplicate'],
+    queryFn: () => getJson<{ data: Relation[]; counts: Record<string, number> }>('projects/relations?status=possible_duplicate'),
+  })
+  const decide = useMutation({
+    mutationFn: ({ id, decision }: { id: number; decision: 'same' | 'different' }) =>
+      sendJson(`projects/relations/${id}/decide`, 'POST', { decision }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['relations'] })
+      qc.invalidateQueries({ queryKey: ['system-overview'] })
+    },
+  })
+  const rows = data?.data ?? []
+  const c = data?.counts ?? {}
+  return (
+    <Section
+      title="身份冲突队列"
+      desc="Surf ID 相同、同链合约相同、或官网与 X 账号同时相同，会自动合并；只有官网或只有 X 账号相同的，放在这里等你判断。"
+      right={<span className="text-xs text-fg-muted shrink-0">已自动/人工合并 {c.confirmed_same ?? 0} · 确认不同 {c.confirmed_different ?? 0}</span>}
+    >
+      {rows.length === 0 ? (
+        <p className="text-sm text-fg-subtle">没有待判断的疑似重复项目。</p>
+      ) : (
+        <ul className="flex flex-col">
+          {rows.map((r) => (
+            <li key={r.id} className="grid grid-cols-[1fr_1fr_auto] gap-4 items-center border-t border-border-base py-2.5 text-sm">
+              <ProjectCell p={r.project_a} />
+              <div className="min-w-0">
+                <ProjectCell p={r.project_b} />
+                <div className="text-[11px] text-fg-subtle mt-0.5">依据：{r.reason ?? '—'}</div>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  disabled={decide.isPending}
+                  onClick={() => decide.mutate({ id: r.id, decision: 'same' })}
+                  className="rounded-md bg-fg-base text-background px-3 py-1 text-xs font-semibold disabled:opacity-50"
+                >
+                  是同一项目，合并
+                </button>
+                <button
+                  disabled={decide.isPending}
+                  onClick={() => decide.mutate({ id: r.id, decision: 'different' })}
+                  className="rounded-md border border-border-strong px-3 py-1 text-xs font-semibold hover:bg-bg-subtle-hover disabled:opacity-50"
+                >
+                  不同项目
+                </button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+      {decide.isError && <p className="text-xs text-destructive mt-2">{(decide.error as Error).message}</p>}
+    </Section>
+  )
+}
+
 function UsageLog() {
   const { data } = useQuery({
     queryKey: ['system-usage'],
@@ -387,7 +511,7 @@ function UsageLog() {
                 <th className="font-normal py-1.5">接口</th>
                 <th className="font-normal py-1.5">触发</th>
                 <th className="font-normal py-1.5">结果</th>
-                <th className="font-normal py-1.5 text-right">消耗</th>
+                <th className="font-normal py-1.5 text-right">预估 / 实际</th>
                 <th className="font-normal py-1.5 text-right">耗时</th>
               </tr>
             </thead>
@@ -404,7 +528,11 @@ function UsageLog() {
                       {st.label}
                       {r.error && <div className="text-[11px] text-fg-muted truncate max-w-[260px]">{r.error}</div>}
                     </td>
-                    <td className="py-1.5 text-right tabular-nums">{fmtNum(r.credits, 1)}</td>
+                    <td className="py-1.5 text-right tabular-nums">
+                      <span className="text-fg-muted">{r.estimated_credits != null ? fmtNum(r.estimated_credits, 1) : '—'}</span>
+                      {' / '}
+                      {fmtNum(r.credits, 1)}
+                    </td>
                     <td className="py-1.5 text-right tabular-nums text-fg-subtle">{r.duration_ms != null ? `${fmtNum(r.duration_ms)} ms` : '—'}</td>
                   </tr>
                 )
@@ -445,6 +573,8 @@ export default function SystemPage() {
           <BudgetPanel o={data} />
           <ChainMatrix chains={data.chains} />
           <ProvidersTable providers={data.providers} />
+          <EndpointStats rows={data.budget.byEndpoint ?? []} />
+          <ConflictQueue />
           <SelftestPanel last={data.last_selftest} />
           {data.settings.surf_budget && <BudgetSettings setting={data.settings.surf_budget} />}
           <UsageLog />
