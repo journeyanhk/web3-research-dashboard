@@ -10,7 +10,7 @@ const { recordMetric } = require('./metrics')
 const { secretValues, getSecret } = require('./config')
 
 const ROOT = path.join(__dirname, '..', '..')
-const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', '.vulcan', 'uploads', '.claude', 'secrets'])
+const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', '.vulcan', 'uploads', '.claude', 'secrets', 'outputs'])
 // 任何以 .env 开头的文件都不扫描（它们本来就存放密钥），但必须保证没有被 Git 跟踪
 const isEnvFile = (name) => name.startsWith('.env')
 const JUP = 'JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN' // Jupiter（SOL 真实代币，用于连通性验证）
@@ -81,12 +81,12 @@ async function runSelftest() {
     let tracked = []
     try {
       tracked = execSync('git ls-files', { cwd: ROOT, encoding: 'utf8' }).split('\n')
-        .filter((f) => (/(^|\/)\.env/.test(f) && !/\.env\.example$/.test(f)) || (/^backend\/secrets\//.test(f) && !/README\.md$/.test(f)))
+        .filter((f) => (/(^|\/)\.env/.test(f) && !/\.env\.example$/.test(f)) || (/^backend\/secrets\//.test(f) && !/README\.md$/.test(f)) || /^outputs\//.test(f))
     } catch (e) {
       throw new Error(`无法读取 Git 跟踪文件：${e.message.slice(0, 120)}`)
     }
     assert(tracked.length === 0, `以下密钥文件被 Git 跟踪：${tracked.join(', ')}`)
-    return '.env / .env.* / secrets/runtime.json 均未被跟踪'
+    return '.env / .env.* / secrets/runtime.json / 发布包 outputs/ 均未被跟踪'
   })
   await step(results, '安全', '调用记录与原始存档中不包含密钥', async () => {
     let n = 0
