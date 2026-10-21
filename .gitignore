@@ -1,0 +1,15 @@
+# 依赖与构建产物
+node_modules/
+dist/
+*.log
+
+# 密钥与本地配置（绝不提交）
+.env
+.env.*
+!.env.example
+
+# 平台/会话文件
+.vulcan/
+.claude/
+uploads/
+frontend/.vulcan-error-reporter.js
