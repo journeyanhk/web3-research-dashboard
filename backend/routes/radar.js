@@ -59,7 +59,9 @@ router.get('/overview', wrap(async (req, res) => {
   const gates = await db.one(
     `SELECT count(*) FILTER (WHERE ${CHAIN_MISSING_SQL})::int AS chain_missing,
             count(*) FILTER (WHERE (p.screening_facts->>'focus') = 'true')::int AS focus,
-            count(*) FILTER (WHERE p.identity_status = 'name_only')::int AS name_only
+            count(*) FILTER (WHERE p.identity_status = 'name_only')::int AS name_only,
+            count(*) FILTER (WHERE p.listing_evidence_level = 'inferred')::int AS listing_unverified,
+            count(*) FILTER (WHERE p.chain_source = 'airdrop_task')::int AS airdrop_chain_only
      FROM wr_projects p WHERE p.merged_into IS NULL`)
   const lastBackfill = await db.one(
     `SELECT id, trigger, status, started_at, finished_at, stats, error FROM wr_job_runs WHERE job = 'identity_backfill' ORDER BY id DESC LIMIT 1`)

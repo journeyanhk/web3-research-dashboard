@@ -163,6 +163,7 @@ async function resolveByName(ctx, name, chains, source, { search = true } = {}) 
     let id = existing.id
     if (hit) id = await identity.attachIdentity(existing.id, { surfId: hit.id, symbol: hit.symbol, chains: hit.chains, source })
     if (chains.length) await identity.setChains(id, chains, chainSource)
+    if (source === 'airdrop') await identity.addCampaignChains(id, chains)
     if (hit) {
       return { projectId: id, method: 'name_search', confidence: 'medium', created: false,
         evidence: { ...m.evidence, selection_reason: `${m.evidence.selection_reason}；Surf 名称完全一致，已补充 Surf ID` } }
@@ -174,6 +175,7 @@ async function resolveByName(ctx, name, chains, source, { search = true } = {}) 
   if (hit) {
     const u = await identity.upsertProject({ surfId: hit.id, name: hit.name, symbol: hit.symbol, source })
     if (chains.length) await identity.setChains(u.id, chains, chainSource)
+    if (source === 'airdrop') await identity.addCampaignChains(u.id, chains)
     await db.query(
       `UPDATE wr_projects SET logo_url = COALESCE(logo_url, $2), description = COALESCE(description, $3), surf_searched_at = now() WHERE id = $1`,
       [u.id, hit.logo_url || null, hit.description || null],
@@ -183,6 +185,7 @@ async function resolveByName(ctx, name, chains, source, { search = true } = {}) 
   }
   const u = await identity.upsertProject({ name, source })
   if (chains.length) await identity.setChains(u.id, chains, chainSource)
+  if (source === 'airdrop' && u.id) await identity.addCampaignChains(u.id, chains)
   if (needSearch) await db.query('UPDATE wr_projects SET surf_searched_at = now() WHERE id = $1', [u.id])
   return { projectId: u.id, method: 'name', confidence: 'low', created: u.created,
     evidence: { matched_name: norm, selection_reason: u.created ? '无同名项目，Surf 中也未找到，仅名称建档' : '仅名称' } }
@@ -272,7 +275,11 @@ async function collectAirdrops(ctx) {
     let link
     if (it.project_id) {
       const u = await identity.upsertProject({ surfId: it.project_id, name, symbol: it.coin_symbol, source: 'airdrop' })
-      if (chains.length) await identity.setChains(u.id, chains, 'airdrop_task')
+      // 空投任务所在链：记为活动链；写入项目链时只作为待核实线索（链状态不会因此变成已确认）
+      if (chains.length) {
+        await identity.addCampaignChains(u.id, chains)
+        await identity.setChains(u.id, chains, 'airdrop_task')
+      }
       if (it.logo_url) await db.query('UPDATE wr_projects SET logo_url = COALESCE(logo_url, $2) WHERE id = $1', [u.id, it.logo_url])
       link = { projectId: u.id, method: 'surf_id', confidence: 'high', created: u.created, evidence: { surf_project_id: it.project_id } }
     } else {
@@ -469,9 +476,11 @@ async function enrichDetails(ctx) {
       contracts, chains: [...(d.overview?.chains || []), ...contracts.map((c) => c.chain)], symbol: d.overview?.token_symbol || d.token_info?.symbol, source: 'project_detail',
     })
     if (finalId !== p.id) st.merged++
-    // 项目详情里的链（含合约所在链）是已确认的链信息，覆盖文字推断 / 空投任务推断的链
-    const detailChains = [...(d.overview?.chains || []), ...contracts.map((c) => c.chain)]
-    if (detailChains.length) await identity.setChains(finalId, detailChains, 'surf_detail')
+    // 项目详情里的链是已确认的部署链；详情没写链、只有合约时，用合约所在链（同样算已确认，可信度略低）
+    const overviewChains = d.overview?.chains || []
+    const contractChains = contracts.map((c) => c.chain)
+    if (overviewChains.length) await identity.setChains(finalId, [...overviewChains, ...contractChains], 'surf_detail')
+    else if (contractChains.length) await identity.setChains(finalId, contractChains, 'contract_chain')
     if (Array.isArray(d.overview?.tags) && d.overview.tags.length) {
       await db.query('UPDATE wr_projects SET tags = $2::jsonb WHERE id = $1', [finalId, JSON.stringify(d.overview.tags.slice(0, 10))])
     }

@@ -17,7 +17,7 @@ function buildWhere(query, { includeStage }) {
     params.push(value)
     where.push(builder(`$${params.length}`))
   }
-  const { chain, source, identity, signal, q, chain_priority: chainPriority, stage, maturity, chain_status: chainStatus, gate } = query
+  const { chain, source, identity, signal, q, chain_priority: chainPriority, stage, maturity, chain_status: chainStatus, gate, listing } = query
   if (chain) addParam((p) => `p.chains ? ${p}`, String(chain))
   if (chainPriority) addParam((p) => `p.chain_priority = ${p}`, String(chainPriority))
   if (source) addParam((p) => `p.source_types ? ${p}`, String(source))
@@ -25,6 +25,7 @@ function buildWhere(query, { includeStage }) {
   if (signal) addParam((p) => `p.signal_label = ${p}`, String(signal))
   if (maturity) addParam((p) => `p.maturity_status = ${p}`, String(maturity))
   if (chainStatus) addParam((p) => `p.chain_status = ${p}`, String(chainStatus))
+  if (listing) addParam((p) => `COALESCE(p.listing_evidence_level, 'none') = ${p}`, String(listing))
   // M2.3 快捷入口：只差确认链 / 待验证重点
   if (gate === 'chain_missing') where.push(CHAIN_MISSING_SQL)
   if (gate === 'focus') where.push(`(p.screening_facts->>'focus') = 'true'`)
@@ -67,7 +68,7 @@ async function listProjects(query = {}) {
             p.identity_status, p.source_types, p.signal_label, p.completeness::float AS completeness, p.tge_status,
             p.credits_spent::float AS credits_spent, p.first_seen_at, p.last_event_at, p.website_domain, p.twitter_handle,
             p.discovery_source, p.review_status, p.detail_fetched_at AS last_detail_at, lm.last_metric_at,
-            p.maturity_status, p.chain_status, p.chain_source, p.last_signal_at, p.reactivated_at, p.tags, p.flags,
+            p.maturity_status, p.chain_status, p.chain_source, p.listing_evidence_level, p.campaign_chains, p.last_signal_at, p.reactivated_at, p.tags, p.flags,
             (p.screening_facts->>'qualifies') = 'true' AS qualifies, (p.screening_facts->>'focus') = 'true' AS focus,
             p.screening_facts->>'would_be_stage' AS would_be_stage,
             ${FRESHNESS_SQL} AS freshness,

@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { getJson, sendJson, fmtNum, fmtTime, fmtAgo } from '@/lib/fetcher'
 import {
   STAGE_LABEL, STAGE_ORDER, IDENTITY_LABEL, SOURCE_LABEL, TGE_LABEL, LINK_LABEL, CONFIDENCE_LABEL, ID_TYPE_LABEL, FRESHNESS_LABEL, chainText,
-  CHAINS, MATURITY_LABEL, CHAIN_STATUS_LABEL, CHAIN_SOURCE_LABEL, GROUP_LABEL,
+  CHAINS, MATURITY_LABEL, CHAIN_STATUS_LABEL, CHAIN_SOURCE_LABEL, GROUP_LABEL, LISTING_LABEL, SNAPSHOT_TYPE_LABEL,
 } from '@/lib/labels'
 
 interface Evidence {
@@ -32,6 +32,10 @@ interface Facts {
   focus?: boolean
   would_be_stage?: string | null
   last_signal_at?: string | null
+  listing_evidence_level?: string | null
+  market_data_suggests_listed?: boolean
+  campaign_chains?: string[]
+  data_as_of?: string | null
 }
 interface Project {
   id: number
@@ -64,12 +68,14 @@ interface Project {
   maturity_status?: string | null
   chain_status?: string | null
   chain_source?: string | null
+  listing_evidence_level?: string | null
+  campaign_chains?: string[] | null
   last_signal_at?: string | null
   reactivated_at?: string | null
   tags?: string[] | null
   flags?: string[] | null
 }
-interface Snapshot { id: number; rule_version: string; stage: string; stage_reason?: string | null; created_at: string; groups?: string[] | null; qualifies?: string | null; chain_status?: string | null; maturity?: string | null }
+interface Snapshot { id: number; rule_version: string; stage: string; stage_reason?: string | null; created_at: string; groups?: string[] | null; qualifies?: string | null; chain_status?: string | null; maturity?: string | null; snapshot_type?: string | null; data_as_of?: string | null; listing_evidence_level?: string | null }
 interface Detail {
   project: Project
   identifiers: { id_type: string; id_value: string; source?: string | null; created_at: string }[]
@@ -200,12 +206,20 @@ function ChainConfirm({ p, facts }: { p: Project; facts: Facts }) {
   })
   const onlyChainMissing = facts.qualifies && p.chain_status !== 'core_confirmed' && ['pending_verify', 'data_incomplete', 'dormant', 'archived'].includes(p.stage)
   return (
-    <Card title="所属链" desc="只有人工确认、Surf 详情或空投任务给出的链算「已确认」；从名称 / 描述文字推断的链只算待核实。"
+    <Card title="所属链" desc="只有人工确认、Surf 项目详情或合约所在链算「已确认」；空投任务要求的链和从文字推断的链只是线索，不代表项目部署链。"
       right={<span className={`text-sm font-semibold ${status.cls}`} title={status.tip}>{status.text}</span>}>
       <div className="text-sm flex flex-wrap gap-x-4 gap-y-1">
         <span>当前：{chainText(p.chains)}{(p.chains ?? []).filter((c) => !CHAINS.some((x) => x.id === c)).length > 0 && <span className="text-fg-muted">（{(p.chains ?? []).join(', ')}）</span>}</span>
         <span className="text-fg-subtle">来源：{p.chain_source ? CHAIN_SOURCE_LABEL[p.chain_source] ?? p.chain_source : '—'}</span>
+        {(p.campaign_chains ?? []).length > 0 && (
+          <span className="text-fg-subtle" title="空投 / 任务活动要求用户去操作的链，不代表项目部署在这些链上">
+            空投活动涉及的链：{(p.campaign_chains ?? []).map((c) => CHAINS.find((x) => x.id === c)?.label ?? c).join('、')}
+          </span>
+        )}
       </div>
+      {p.chain_source === 'airdrop_task' && (
+        <p className="text-sm mt-2 text-[var(--color-tag-orange-100)]">当前链只来自空投任务要求，不代表项目部署链，需要核实后才算已确认。</p>
+      )}
       {onlyChainMissing && (
         <p className="text-sm mt-2 text-[var(--color-tag-yellow-100)]">证据已满足初筛条件，只差确认所属链。确认为核心链后会立即进入初筛。</p>
       )}
@@ -375,6 +389,11 @@ export default function ProjectDetailPage({ id }: { id: number }) {
           <span className="text-sm text-fg-subtle">{chainText(p.chains)}</span>
           {p.tge_status && <span className="text-sm text-fg-subtle">{TGE_LABEL[p.tge_status] ?? p.tge_status}</span>}
           {p.maturity_status && <span className="text-sm text-fg-subtle">成熟度：{MATURITY_LABEL[p.maturity_status] ?? p.maturity_status}</span>}
+          {p.listing_evidence_level && (
+            <span className="text-sm text-fg-subtle" title={LISTING_LABEL[p.listing_evidence_level]?.tip}>
+              上市证据：<span className={LISTING_LABEL[p.listing_evidence_level]?.cls}>{LISTING_LABEL[p.listing_evidence_level]?.text ?? p.listing_evidence_level}</span>
+            </span>
+          )}
           {(p.tags ?? []).length > 0 && <span className="text-xs text-fg-muted">{(p.tags ?? []).slice(0, 5).join(' · ')}</span>}
         </div>
         <div className="flex flex-wrap gap-x-4 gap-y-1 mt-1.5 text-xs text-fg-subtle">
@@ -517,19 +536,25 @@ export default function ProjectDetailPage({ id }: { id: number }) {
               </table>
             )}
           </Card>
-          <Card title="初筛快照" desc="阶段或依据变化时自动记录一次，规则调整后可追溯当时的判断。">
+          <Card title="初筛快照" desc="阶段或依据变化时自动记录一次。「当时运行」是系统当时真实看到的判断；「迁移重算」「人工重算」是事后用新规则重新计算的结果，不代表当时的判断。">
             {(data.snapshots ?? []).length === 0 ? <p className="text-sm text-fg-subtle">暂无快照。</p> : (
               <ul className="flex flex-col text-sm">
                 {(data.snapshots ?? []).map((sn) => (
                   <li key={sn.id} className="border-t border-border-base py-1.5 first:border-t-0">
                     <div>
                       {STAGE_LABEL[sn.stage] ?? sn.stage}
-                      <span className="text-[11px] text-fg-muted ml-1.5">{sn.rule_version} · {fmtTime(sn.created_at)}</span>
+                      <span className={`text-[11px] ml-1.5 px-1 rounded ${sn.snapshot_type === 'historical_runtime' ? 'text-fg-subtle' : 'text-[var(--color-tag-yellow-100)]'}`}>
+                        {SNAPSHOT_TYPE_LABEL[sn.snapshot_type ?? ''] ?? sn.snapshot_type ?? '—'}
+                      </span>
+                      <span className="text-[11px] text-fg-muted ml-1.5">
+                        {sn.rule_version} · 记录于 {fmtTime(sn.created_at)}{sn.data_as_of ? ` · 数据截至 ${fmtTime(sn.data_as_of)}` : ''}
+                      </span>
                     </div>
                     <div className="text-[11px] text-fg-muted">
                       独立来源 {(sn.groups ?? []).map((g) => GROUP_LABEL[g] ?? g).join('、') || '无'}
                       {sn.chain_status ? ` · ${CHAIN_STATUS_LABEL[sn.chain_status]?.text ?? sn.chain_status}` : ''}
                       {sn.maturity ? ` · ${MATURITY_LABEL[sn.maturity] ?? sn.maturity}` : ''}
+                      {sn.listing_evidence_level ? ` · ${LISTING_LABEL[sn.listing_evidence_level]?.text ?? sn.listing_evidence_level}` : ''}
                     </div>
                     {sn.stage_reason && <div className="text-[11px] text-fg-muted">{sn.stage_reason}</div>}
                   </li>

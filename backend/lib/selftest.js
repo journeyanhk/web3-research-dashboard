@@ -392,6 +392,40 @@ async function boundaryTests(results) {
       assert(n.stage === 'opportunity_chain', `新 L2：${n.stage}`)
       return '市值 5 亿 → 非早期；市值 2000 万 → 已上市观察；Base → 非早期；L2 标签 → 机会链'
     })
+    await step(results, '漏斗', 'Review P1：只有空投任务所在链（Solana）→ 链待核实，不进初筛', async () => {
+      const cs = pipeline.chainStatusOf(['solana'], 'airdrop_task')
+      const d = pipeline.decideStage(base({ ...ok2(), chainStatus: cs, chains: ['solana'], chainSource: 'airdrop_task' }))
+      assert(cs === 'inferred', `空投任务链被算成 ${cs}`)
+      assert(d.stage !== 'screening' && d.stage === 'pending_verify' && /空投任务/.test(d.reason), `进入了 ${d.stage}：${d.reason}`)
+      assert(pipeline.chainStatusOf(['base'], 'contract_chain') === 'core_confirmed', '合约所在链应算已确认')
+      assert(!pipeline.CONFIRMED_CHAIN_SOURCES.includes('airdrop_task'), '空投任务仍在已确认来源里')
+      return `空投链 → ${cs}，阶段 ${d.stage}；合约所在链 → 核心链已确认`
+    })
+    await step(results, '漏斗', 'Review P2：只有市值 > 0 → 不算已上市；TGE 已完成或确认上币 → 已上市', async () => {
+      const a = pipeline.decideStage(base({ ...ok2(), project: { name: 'X', tge_status: null }, metrics: { market_cap_usd: 2e7 } }))
+      const b = pipeline.decideStage(base({ ...ok2(), project: { name: 'X', tge_status: null }, metrics: { market_cap_usd: 5e8, fdv_usd: 1e9 } }))
+      const c = pipeline.decideStage(base({ ...ok2(), project: { name: 'X', tge_status: null }, metrics: { market_cap_usd: 2e7 }, listingLevel: 'confirmed' }))
+      assert(a.stage === 'screening' && a.facts.maturity !== 'listed' && a.facts.listing_evidence_level === 'inferred'
+        && a.facts.market_data_suggests_listed === true, `仅市值 2000 万：${a.stage} / ${a.facts.maturity}`)
+      assert(b.stage !== 'non_early' && b.stage !== 'listed_watch', `仅市值 5 亿被移出早期池：${b.stage}`)
+      assert(c.stage === 'listed_watch' && c.facts.listing_evidence_level === 'confirmed', `确认上币：${c.stage}`)
+      assert(pipeline.listingLevelOf({ tgeStatus: 'post', metrics: {} }) === 'confirmed' && pipeline.listingLevelOf({ metrics: {} }) === 'none', '上市证据分级错误')
+      return `仅市值 → ${a.stage}（标记「可能已上市待核实」）；仅市值 5 亿 → ${b.stage}；确认上币 → 已上市观察`
+    })
+    await step(results, '漏斗', 'Review P1（库内）：空投任务链只记入「空投活动涉及的链」，项目链状态为待核实', async () => {
+      const identity = require('./identity')
+      const p4 = (await db.one(`INSERT INTO wr_projects (name, discovery_source) VALUES ($1, 'selftest_tmp') RETURNING id`, [`WR自检空投链${tag}`])).id
+      tmp.push(p4)
+      await identity.addCampaignChains(p4, ['solana'])
+      await identity.setChains(p4, ['solana'], 'airdrop_task')
+      await pipeline.evaluateProjects([p4])
+      const r = await db.one('SELECT chain_status, chain_source, campaign_chains, stage FROM wr_projects WHERE id = $1', [p4])
+      assert(r.chain_status === 'inferred' && (r.campaign_chains || []).includes('solana') && r.stage !== 'screening', `结果：${JSON.stringify(r)}`)
+      await identity.setChains(p4, ['base'], 'contract_chain')
+      const r2 = await db.one('SELECT chains, chain_source FROM wr_projects WHERE id = $1', [p4])
+      assert(r2.chain_source === 'contract_chain' && r2.chains.includes('base'), '合约所在链没有覆盖空投任务链')
+      return `链状态 ${r.chain_status}，空投活动链 ${JSON.stringify(r.campaign_chains)}；之后合约链（base）优先覆盖`
+    })
     await step(results, '漏斗', '休眠 / 归档阈值：14 天休眠，30 天归档，初筛不自动休眠', async () => {
       const ago = (d) => new Date(Date.now() - d * 86400000).toISOString()
       const a = pipeline.decideStage(base({ lastSignalAt: ago(13) }))
@@ -425,18 +459,41 @@ async function boundaryTests(results) {
       const s2 = await db.one('SELECT count(*)::int c FROM wr_screening_snapshots WHERE project_id = $1', [p2])
       assert(r2.stage !== 'archived' && r2.reactivated_at && /重新激活/.test(r2.stage_reason || ''), `没有自动恢复：${r2.stage}`)
       assert(ch.changed[0]?.reactivated === true && s2.c === 2, `快照 ${s2.c} 条`)
-      return `归档 → 新融资事件 → ${r2.stage}（已标记重新激活），快照 1 → 2 条`
+      const f2 = await db.one('SELECT screening_facts->>\'would_be_stage\' AS w FROM wr_projects WHERE id = $1', [p2])
+      assert(!['dormant', 'archived'].includes(r2.stage) && !f2.w, `恢复后仍是 ${r2.stage}，原阶段记录 ${f2.w}`)
+      const st = await db.one('SELECT snapshot_type, data_as_of FROM wr_screening_snapshots WHERE project_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1', [p2])
+      assert(st.snapshot_type === 'historical_runtime' && st.data_as_of, `快照类型 ${st.snapshot_type}，数据截至 ${st.data_as_of}`)
+      return `归档（31+ 天）→ 新融资事件 → 恢复为自动阶段「${r2.stage}」（已标记重新激活），快照 1 → 2 条，类型「当时运行」`
     })
-    await step(results, '漏斗', '人工确认链：来源记为人工、留痕备注、立即重新评估', async () => {
+    await step(results, '漏斗', '人工确认链：来源记为人工、留痕备注和阶段历史、立即重新评估', async () => {
       await pipeline.confirmChains(p2, ['base'], '自检')
       const r = await db.one('SELECT chains, chain_source, chain_status FROM wr_projects WHERE id = $1', [p2])
       const n = await db.one(`SELECT count(*)::int c FROM wr_notes WHERE project_id = $1 AND body LIKE '人工确认所属链%'`, [p2])
+      const h = await db.one(`SELECT count(*)::int c FROM wr_stage_history WHERE project_id = $1 AND source = 'manual' AND reason LIKE '人工确认所属链%'`, [p2])
+      const sn = await db.one('SELECT snapshot_type FROM wr_screening_snapshots WHERE project_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1', [p2])
       assert(r.chain_source === 'manual' && r.chain_status === 'core_confirmed' && (r.chains || []).includes('base'), `结果：${JSON.stringify(r)}`)
       assert(n.c === 1, '没有写备注')
+      assert(h.c === 1, '没有写阶段历史')
+      assert(sn.snapshot_type === 'manual_recalculate', `人工确认后的快照类型应为人工重算，实际 ${sn.snapshot_type}`)
       let threw = false
       try { await pipeline.confirmChains(p2, []) } catch { threw = true }
       assert(threw, '空链列表应被拒绝')
-      return '链 = base，来源人工确认，状态核心链已确认，已写备注'
+      return '链 = base，来源人工确认，状态核心链已确认，已写备注和阶段历史，快照记为「人工重算」'
+    })
+    await step(results, '漏斗', 'M3 版本隔离：重新评估只追加新快照，旧快照原样保留', async () => {
+      const before = await db.query('SELECT id, facts_hash, rule_version, snapshot_type, md5(facts::text) AS fh FROM wr_screening_snapshots WHERE project_id = $1 ORDER BY id', [p2])
+      assert(before.length >= 2, `快照不足：${before.length}`)
+      await db.query(`UPDATE wr_projects SET tge_status = 'post' WHERE id = $1`, [p2])
+      await pipeline.evaluateProjects([p2])
+      const after = await db.query('SELECT id, facts_hash, rule_version, snapshot_type, md5(facts::text) AS fh FROM wr_screening_snapshots WHERE project_id = $1 ORDER BY id', [p2])
+      for (const b of before) {
+        const a = after.find((x) => x.id === b.id)
+        assert(a && a.facts_hash === b.facts_hash && a.fh === b.fh && a.rule_version === b.rule_version && a.snapshot_type === b.snapshot_type, `旧快照 #${b.id} 被改动`)
+      }
+      assert(after.length === before.length + 1, `应追加 1 条，实际 ${after.length - before.length}`)
+      const f = { screening_rule_version: 'm2.3', x: 1 }
+      assert(pipeline.factsHash('screening', f) !== pipeline.factsHash('screening', { ...f, screening_rule_version: 'm3' }), '规则版本不同但哈希相同')
+      return `${before.length} 条旧快照未变，追加 1 条；规则版本不同会生成新快照`
     })
     await step(results, '漏斗', '身份补全候选：只选从没搜过的仅名称项目；搜过且无新信号的不再查', async () => {
       const p3 = (await db.one(`INSERT INTO wr_projects (name, discovery_source) VALUES ($1, 'selftest_tmp') RETURNING id`, [`WR自检补全${tag}`])).id

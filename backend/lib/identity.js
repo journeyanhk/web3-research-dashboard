@@ -181,10 +181,12 @@ async function mergeProjects(sourceId, targetId, { reason, confidence = 'high', 
          category = COALESCE(t.category, s.category),
          tags = COALESCE(t.tags, s.tags),
          -- 链信息来源取可信度更高的一方（manual > surf_detail > airdrop_task > inferred）
-         chain_source = CASE WHEN array_position(ARRAY['manual','surf_detail','airdrop_task','inferred'], s.chain_source)
-                                < COALESCE(array_position(ARRAY['manual','surf_detail','airdrop_task','inferred'], t.chain_source), 99)
+         chain_source = CASE WHEN array_position(ARRAY['manual','surf_detail','contract_chain','airdrop_task','inferred'], s.chain_source)
+                                < COALESCE(array_position(ARRAY['manual','surf_detail','contract_chain','airdrop_task','inferred'], t.chain_source), 99)
                              THEN s.chain_source ELSE t.chain_source END,
          last_signal_at = GREATEST(t.last_signal_at, s.last_signal_at),
+         campaign_chains = (SELECT COALESCE(jsonb_agg(DISTINCT c), '[]'::jsonb)
+                            FROM jsonb_array_elements_text(COALESCE(t.campaign_chains,'[]'::jsonb) || COALESCE(s.campaign_chains,'[]'::jsonb)) c),
          primary_chain = COALESCE(t.primary_chain, s.primary_chain),
          chains = (SELECT COALESCE(jsonb_agg(DISTINCT c), '[]'::jsonb)
                    FROM jsonb_array_elements_text(COALESCE(t.chains,'[]'::jsonb) || COALESCE(s.chains,'[]'::jsonb)) AS c),
@@ -479,7 +481,10 @@ async function identityStatus(projectIds) {
 
 // ───────── 链信息来源（M2.3）─────────
 // 可信度：manual（人工确认）> surf_detail（Surf 项目详情 / 合约）> airdrop_task（空投任务所在链）> inferred（由标题或简介文字推断）
-const CHAIN_SOURCE_RANK = ['manual', 'surf_detail', 'airdrop_task', 'inferred']
+// 链来源可信度：人工 > Surf 详情 > 合约所在链 > 空投任务 > 文字推断
+// 只有前三类代表项目实际部署链；空投任务所在链只是活动要求，不等于项目部署链（M2.3 Review P1）
+const CHAIN_SOURCE_RANK = ['manual', 'surf_detail', 'contract_chain', 'airdrop_task', 'inferred']
+const CONFIRMED_CHAIN_SOURCES = ['manual', 'surf_detail', 'contract_chain']
 const CORE_CHAIN_IDS = ['ethereum', 'bsc', 'base', 'arbitrum', 'solana', 'robinhood']
 
 /**
@@ -508,8 +513,19 @@ async function setChains(projectId, chains, source, q = db.query) {
   return true
 }
 
+/** 记录空投 / 活动任务涉及的链（只用于展示和活动分析，不参与链状态、核心链加分和初筛） */
+async function addCampaignChains(projectId, chains, q = db.query) {
+  const list = [...new Set((chains || []).map(normalizeChain).filter(Boolean))]
+  if (!projectId || !list.length) return false
+  await q(
+    `UPDATE wr_projects SET campaign_chains = (SELECT COALESCE(jsonb_agg(DISTINCT c), '[]'::jsonb)
+       FROM jsonb_array_elements_text(COALESCE(campaign_chains,'[]'::jsonb) || $2::jsonb) c) WHERE id = $1`,
+    [projectId, JSON.stringify(list)])
+  return true
+}
+
 module.exports = {
-  setChains, CHAIN_SOURCE_RANK,
+  setChains, addCampaignChains, CHAIN_SOURCE_RANK, CONFIRMED_CHAIN_SOURCES,
   upsertProject, attachIdentity, mergeProjects, decideRelation, resolveMerged, identityStatus,
   normalizeDomain, normalizeTwitter, normalizeContract, normalizeChain, normalizeName, buildIdentifiers,
   PROJECT_REF_TABLES, PROJECT_REF_EXEMPT, MERGE_RULE_VERSION,

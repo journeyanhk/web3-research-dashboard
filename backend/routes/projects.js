@@ -39,7 +39,7 @@ router.post('/relations/:id/decide', wrap(async (req, res) => {
   const rel = await db.one('SELECT project_a, project_b FROM wr_project_relations WHERE id = $1', [Number(req.params.id)])
   const r = await decideRelation(Number(req.params.id), decision)
   // 冲突处理后重新评估相关项目（数据冲突状态会自动解除）
-  if (rel) await pipeline.evaluateProjects([rel.project_a, rel.project_b].filter(Boolean))
+  if (rel) await pipeline.evaluateProjects([rel.project_a, rel.project_b].filter(Boolean), { snapshotType: 'manual_recalculate' })
   res.json(r)
 }))
 
@@ -77,7 +77,7 @@ router.post('/events/:id/link', wrap(async (req, res) => {
     await db.query(
       `UPDATE wr_events SET project_id = $2, link_method = 'manual', link_confidence = 'high', link_evidence = $3 WHERE id = $1`,
       [eventId, projectId, JSON.stringify(evidence)])
-    await pipeline.evaluateProjects([projectId])
+    await pipeline.evaluateProjects([projectId], { snapshotType: 'manual_recalculate' })
   } else {
     await db.query(
       `UPDATE wr_events SET link_method = 'manual_none', link_confidence = 'none', link_evidence = $2 WHERE id = $1`,
@@ -91,7 +91,7 @@ router.post('/events/:id/link', wrap(async (req, res) => {
 router.get('/meta', wrap(async (_req, res) => {
   res.json({
     stages: pipeline.STAGES, completeness: pipeline.COMPLETENESS_ITEMS,
-    maturity: pipeline.MATURITY_LABEL, chain_status: pipeline.CHAIN_STATUS_LABEL, chain_source: pipeline.CHAIN_SOURCE_LABEL,
+    maturity: pipeline.MATURITY_LABEL, chain_status: pipeline.CHAIN_STATUS_LABEL, chain_source: pipeline.CHAIN_SOURCE_LABEL, listing: pipeline.LISTING_EVIDENCE_LABEL,
     groups: pipeline.GROUP_LABEL, core_chains: pipeline.CORE_CHAINS, screening_rule_version: pipeline.SCREENING_RULE_VERSION,
   })
 }))
@@ -104,7 +104,7 @@ router.get('/', wrap(async (req, res) => {
 }))
 
 router.post('/evaluate', wrap(async (_req, res) => {
-  res.json(await pipeline.evaluateProjects())
+  res.json(await pipeline.evaluateProjects(null, { snapshotType: 'manual_recalculate' }))
 }))
 
 router.get('/:id(\\d+)', wrap(async (req, res) => {
@@ -144,10 +144,10 @@ router.get('/:id(\\d+)', wrap(async (req, res) => {
        WHERE link_method = 'name_ambiguous' AND project_id IS NULL AND link_evidence->'candidate_projects' @> $1::jsonb`,
       [JSON.stringify([{ id }])]),
     db.query(
-      `SELECT id, rule_version, stage, stage_reason, created_at,
+      `SELECT id, rule_version, stage, stage_reason, created_at, snapshot_type, data_as_of,
               facts->'independence_groups' AS groups, facts->>'qualifies' AS qualifies, facts->>'chain_status' AS chain_status,
-              facts->>'maturity' AS maturity
-       FROM wr_screening_snapshots WHERE project_id = $1 ORDER BY id DESC LIMIT 20`, [id]),
+              facts->>'maturity' AS maturity, facts->>'listing_evidence_level' AS listing_evidence_level
+       FROM wr_screening_snapshots WHERE project_id = $1 ORDER BY created_at DESC, id DESC LIMIT 20`, [id]),
   ])
   res.json({ project: p, identifiers, events, metrics, credits, relations, history, notes, ambiguous, snapshots })
 }))

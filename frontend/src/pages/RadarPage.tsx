@@ -49,7 +49,7 @@ interface RadarOverview {
   chain: string | null
   summary: {
     new_today: number; new_7d: number; total: number; core: number; open_conflicts: number; surf_credits_today: number
-    chain_missing?: number; focus?: number; name_only?: number
+    chain_missing?: number; focus?: number; name_only?: number; listing_unverified?: number; airdrop_chain_only?: number
   }
   funnel?: Record<string, number>
   last_run: RunInfo | null
@@ -286,6 +286,18 @@ function FunnelPanel({ o }: { o: RadarOverview }) {
               {o.last_backfill ? `上次身份补全 ${fmtTime(o.last_backfill.started_at)}` : '可在「数据与点数」页做一次身份补全'}
             </div>
           </div>
+          <button onClick={() => go('listing=inferred')}
+            className="rounded-md border border-border-base px-3 py-2 text-left hover:bg-bg-subtle-hover">
+            <div className="text-xs text-fg-subtle">可能已上市·待核实</div>
+            <div className="text-lg font-bold tabular-nums leading-tight">{fmtNum(o.summary.listing_unverified ?? 0)}</div>
+            <div className="text-[11px] text-fg-muted">只有市值数据，没有 TGE / 上币确认，暂留早期池</div>
+          </button>
+          <button onClick={() => go('chain_status=inferred')}
+            className="rounded-md border border-border-base px-3 py-2 text-left hover:bg-bg-subtle-hover">
+            <div className="text-xs text-fg-subtle">链只来自空投任务</div>
+            <div className="text-lg font-bold tabular-nums leading-tight">{fmtNum(o.summary.airdrop_chain_only ?? 0)}</div>
+            <div className="text-[11px] text-fg-muted">空投任务要求的链不代表部署链，不计入核心链</div>
+          </button>
         </div>
       </div>
     </Panel>

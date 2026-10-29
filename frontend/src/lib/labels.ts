@@ -27,13 +27,21 @@ export const MATURITY_LABEL: Record<string, string> = {
   early: '早期', pre_tge: 'TGE 前', listed: '已上市', mature: '成熟项目', chain_infrastructure: '公链 / L2 本身', unknown: '未知',
 }
 export const CHAIN_STATUS_LABEL: Record<string, { text: string; cls: string; tip: string }> = {
-  core_confirmed: { text: '核心链已确认', cls: 'text-fg-base', tip: '来源为人工确认、Surf 详情或空投任务，且属于 6 条核心链' },
+  core_confirmed: { text: '核心链已确认', cls: 'text-fg-base', tip: '来源为人工确认、Surf 详情或合约所在链，且属于 6 条核心链' },
   other_confirmed: { text: '其他链已确认', cls: 'text-[var(--color-tag-yellow-100)]', tip: '已确认所在链，但不在 6 条核心链内' },
-  inferred: { text: '链待核实', cls: 'text-[var(--color-tag-orange-100)]', tip: '链只是从名称 / 描述文字推断的，需要核实' },
+  inferred: { text: '链待核实', cls: 'text-[var(--color-tag-orange-100)]', tip: '链只来自空投任务要求或名称 / 描述文字推断，不代表项目部署链，需要核实' },
   none: { text: '无链信息', cls: 'text-fg-muted', tip: '没有任何所属链信息' },
 }
 export const CHAIN_SOURCE_LABEL: Record<string, string> = {
-  manual: '人工确认', surf_detail: 'Surf 详情', airdrop_task: '空投任务', inferred: '文字推断',
+  manual: '人工确认', surf_detail: 'Surf 详情', contract_chain: '合约所在链', airdrop_task: '空投任务（仅线索）', inferred: '文字推断',
+}
+export const LISTING_LABEL: Record<string, { text: string; cls: string; tip: string }> = {
+  confirmed: { text: '已确认上市', cls: 'text-fg-base', tip: '已完成 TGE，或有已确认关联的交易所上币事件' },
+  inferred: { text: '可能已上市（待核实）', cls: 'text-[var(--color-tag-orange-100)]', tip: '只有市值 / FDV 数据，没有 TGE 或上币确认，暂留早期池' },
+  none: { text: '无上市证据', cls: 'text-fg-muted', tip: '没有任何上市迹象' },
+}
+export const SNAPSHOT_TYPE_LABEL: Record<string, string> = {
+  historical_runtime: '当时运行', migration_backfill: '迁移重算', manual_recalculate: '人工重算',
 }
 export const GROUP_LABEL: Record<string, string> = {
   surf_project: 'Surf 项目数据', surf_fundraising: 'Surf 融资数据', official_project: '官方 / 人工确认',

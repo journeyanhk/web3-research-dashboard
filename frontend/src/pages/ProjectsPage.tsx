@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { getJson, sendJson, fmtNum, fmtTime, fmtAgo } from '@/lib/fetcher'
-import { CHAINS, STAGE_LABEL, STAGE_ORDER, IDENTITY_LABEL, SOURCE_LABEL, TGE_LABEL, FRESHNESS_LABEL, MATURITY_LABEL, CHAIN_STATUS_LABEL, CHAIN_SOURCE_LABEL, OUT_OF_POOL_STAGES, chainText } from '@/lib/labels'
+import { CHAINS, STAGE_LABEL, STAGE_ORDER, IDENTITY_LABEL, SOURCE_LABEL, TGE_LABEL, FRESHNESS_LABEL, MATURITY_LABEL, CHAIN_STATUS_LABEL, CHAIN_SOURCE_LABEL, LISTING_LABEL, OUT_OF_POOL_STAGES, chainText } from '@/lib/labels'
 
 interface PoolRow {
   id: number
@@ -30,6 +30,7 @@ interface PoolRow {
   last_metric_at?: string | null
   maturity_status?: string | null
   chain_status?: string | null
+  listing_evidence_level?: string | null
   chain_source?: string | null
   last_signal_at?: string | null
   reactivated_at?: string | null
@@ -81,7 +82,8 @@ export default function ProjectsPage() {
   const [stage, setStage] = useState(initialParam('stage'))
   const [gate, setGate] = useState(initialParam('gate'))
   const [maturity, setMaturity] = useState('')
-  const [chainStatus, setChainStatus] = useState('')
+  const [chainStatus, setChainStatus] = useState(initialParam('chain_status'))
+  const [listing, setListing] = useState(initialParam('listing'))
   const [chain, setChain] = useState('')
   const [source, setSource] = useState('')
   const [identity, setIdentity] = useState('')
@@ -91,7 +93,7 @@ export default function ProjectsPage() {
   const [offset, setOffset] = useState(0)
 
   const params = new URLSearchParams()
-  for (const [k, v] of Object.entries({ stage, gate, maturity, chain_status: chainStatus, chain, source, identity, signal, sort, q })) if (v) params.set(k, v)
+  for (const [k, v] of Object.entries({ stage, gate, maturity, chain_status: chainStatus, listing, chain, source, identity, signal, sort, q })) if (v) params.set(k, v)
   params.set('limit', String(PAGE))
   params.set('offset', String(offset))
   const { data, isLoading, error } = useQuery({
@@ -179,6 +181,8 @@ export default function ProjectsPage() {
           options={[['', '全部'], ...Object.entries(MATURITY_LABEL)]} />
         <Select label="链状态" value={chainStatus} onChange={reset(setChainStatus)}
           options={[['', '全部'], ...Object.entries(CHAIN_STATUS_LABEL).map(([k, v]) => [k, v.text] as [string, string])]} />
+        <Select label="上市证据" value={listing} onChange={reset(setListing)}
+          options={[['', '全部'], ...Object.entries(LISTING_LABEL).map(([k, v]) => [k, v.text] as [string, string])]} />
         <Select label="排序" value={sort} onChange={reset(setSort)} options={SORTS} />
       </div>
 
@@ -237,6 +241,7 @@ export default function ProjectsPage() {
                           <div className="text-fg-subtle">{chainText(p.chains)}</div>
                           {(() => { const c = CHAIN_STATUS_LABEL[p.chain_status ?? 'none'] ?? CHAIN_STATUS_LABEL.none; return <div className={`text-[11px] ${c.cls}`}>{c.text}</div> })()}
                           {p.maturity_status && p.maturity_status !== 'unknown' && <div className="text-[11px] text-fg-muted">{MATURITY_LABEL[p.maturity_status] ?? p.maturity_status}</div>}
+                          {p.listing_evidence_level === 'inferred' && <div className="text-[11px] text-[var(--color-tag-orange-100)]" title={LISTING_LABEL.inferred.tip}>可能已上市·待核实</div>}
                         </td>
                         <td className="py-2 pr-3 text-right tabular-nums">{p.completeness != null ? `${Math.round(p.completeness * 100)}%` : '—'}</td>
                         <td className="py-2 pr-3 whitespace-nowrap" title={`最近事件 ${fmtAgo(p.last_event_at)} · 最近详情 ${fmtAgo(p.last_detail_at)} · 最近指标 ${fmtAgo(p.last_metric_at)}`}>
