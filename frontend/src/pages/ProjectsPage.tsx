@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { getJson, sendJson, fmtNum, fmtTime, fmtAgo } from '@/lib/fetcher'
-import { CHAINS, STAGE_LABEL, STAGE_ORDER, IDENTITY_LABEL, SOURCE_LABEL, TGE_LABEL, FRESHNESS_LABEL, chainText } from '@/lib/labels'
+import { CHAINS, STAGE_LABEL, STAGE_ORDER, IDENTITY_LABEL, SOURCE_LABEL, TGE_LABEL, FRESHNESS_LABEL, MATURITY_LABEL, CHAIN_STATUS_LABEL, CHAIN_SOURCE_LABEL, OUT_OF_POOL_STAGES, chainText } from '@/lib/labels'
 
 interface PoolRow {
   id: number
@@ -28,7 +28,25 @@ interface PoolRow {
   freshness?: string | null
   last_detail_at?: string | null
   last_metric_at?: string | null
+  maturity_status?: string | null
+  chain_status?: string | null
+  chain_source?: string | null
+  last_signal_at?: string | null
+  reactivated_at?: string | null
+  qualifies?: boolean | null
+  focus?: boolean | null
+  would_be_stage?: string | null
 }
+
+// 从地址读取初始筛选（雷达页的「只差确认链」等入口会带上 ?gate=）
+function initialParam(name: string) {
+  const qs = window.location.hash.split('?')[1] ?? ''
+  return new URLSearchParams(qs).get(name) ?? ''
+}
+const GATES: [string, string, string][] = [
+  ['chain_missing', '只差确认链', '证据已满足初筛，只因所属链未确认没进初筛；进详情页可一键确认链（不花点数）'],
+  ['focus', '待验证重点', '有高质量融资和产品证据，但缺所属链信息'],
+]
 interface PoolResponse {
   data: PoolRow[]
   total: number
@@ -60,7 +78,10 @@ function Select({ value, onChange, options, label }: { value: string; onChange: 
 
 export default function ProjectsPage() {
   const qc = useQueryClient()
-  const [stage, setStage] = useState('')
+  const [stage, setStage] = useState(initialParam('stage'))
+  const [gate, setGate] = useState(initialParam('gate'))
+  const [maturity, setMaturity] = useState('')
+  const [chainStatus, setChainStatus] = useState('')
   const [chain, setChain] = useState('')
   const [source, setSource] = useState('')
   const [identity, setIdentity] = useState('')
@@ -70,7 +91,7 @@ export default function ProjectsPage() {
   const [offset, setOffset] = useState(0)
 
   const params = new URLSearchParams()
-  for (const [k, v] of Object.entries({ stage, chain, source, identity, signal, sort, q })) if (v) params.set(k, v)
+  for (const [k, v] of Object.entries({ stage, gate, maturity, chain_status: chainStatus, chain, source, identity, signal, sort, q })) if (v) params.set(k, v)
   params.set('limit', String(PAGE))
   params.set('offset', String(offset))
   const { data, isLoading, error } = useQuery({
@@ -92,7 +113,8 @@ export default function ProjectsPage() {
         <div>
           <h1 className="text-xl font-bold">项目池</h1>
           <p className="text-sm text-fg-subtle mt-1">
-            前 5 个阶段由规则自动判断；进入深度尽调及之后的阶段需人工设定。初筛需满足至少 1 个硬条件 + 1 个加分条件，且证据涉及至少 2 类数据。
+            初筛口径 m2.3：至少 1 个硬条件 + 1 个加分条件 + 至少 2 个独立来源（同一条记录的多个字段只算 1 个来源），且所属链已确认属于 6 条核心链。
+            已上市、成熟项目和公链本身移出早期池（数据保留）；14 天无新信号休眠、30 天归档，出现新信号自动恢复。
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -126,6 +148,18 @@ export default function ProjectsPage() {
         })}
       </div>
 
+      {/* 快捷入口 */}
+      <div className="flex flex-wrap items-center gap-2 text-xs">
+        <span className="text-fg-muted">快捷入口</span>
+        {GATES.map(([id, label, tip]) => (
+          <button key={id} title={tip} onClick={() => { setGate(gate === id ? '' : id); setOffset(0) }}
+            className={`rounded-md px-2.5 py-1 border ${gate === id ? 'border-fg-base bg-fg-base text-background font-semibold' : 'border-border-base text-fg-subtle hover:bg-bg-subtle-hover'}`}>
+            {label}
+          </button>
+        ))}
+        {gate && <span className="text-fg-muted">{GATES.find((g) => g[0] === gate)?.[2]}</span>}
+      </div>
+
       {/* 筛选 */}
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
         <input
@@ -141,6 +175,10 @@ export default function ProjectsPage() {
           options={[['', '全部'], ['confirmed', '已确认'], ['partial', '部分确认'], ['name_only', '仅名称']]} />
         <Select label="信号" value={signal} onChange={reset(setSignal)}
           options={[['', '全部'], ...(data?.signals ?? []).map((s) => [s.signal_label, `${s.signal_label}（${s.c}）`] as [string, string])]} />
+        <Select label="成熟度" value={maturity} onChange={reset(setMaturity)}
+          options={[['', '全部'], ...Object.entries(MATURITY_LABEL)]} />
+        <Select label="链状态" value={chainStatus} onChange={reset(setChainStatus)}
+          options={[['', '全部'], ...Object.entries(CHAIN_STATUS_LABEL).map(([k, v]) => [k, v.text] as [string, string])]} />
         <Select label="排序" value={sort} onChange={reset(setSort)} options={SORTS} />
       </div>
 
@@ -186,11 +224,20 @@ export default function ProjectsPage() {
                         </td>
                         <td className="py-2 pr-3 whitespace-nowrap" title={p.stage_reason ?? ''}>
                           <div>{STAGE_LABEL[p.stage] ?? p.stage}</div>
-                          <div className="text-[11px] text-fg-muted">{p.stage_source === 'manual' ? '人工设定' : '自动'}</div>
+                          <div className="text-[11px] text-fg-muted">
+                            {p.stage_source === 'manual' ? '人工设定' : '自动'}
+                            {p.would_be_stage && ` · 原 ${STAGE_LABEL[p.would_be_stage] ?? p.would_be_stage}`}
+                            {p.focus && ' · 重点'}
+                            {p.qualifies && p.stage !== 'screening' && !OUT_OF_POOL_STAGES.has(p.stage) && p.chain_status !== 'core_confirmed' && ' · 只差确认链'}
+                          </div>
                         </td>
                         <td className="py-2 pr-3 text-fg-subtle whitespace-nowrap">{p.signal_label ?? '—'}</td>
                         <td className="py-2 pr-3 whitespace-nowrap" title={id.tip}><span className={id.cls}>{id.text}</span></td>
-                        <td className="py-2 pr-3 text-fg-subtle whitespace-nowrap">{chainText(p.chains)}</td>
+                        <td className="py-2 pr-3 whitespace-nowrap" title={`${CHAIN_STATUS_LABEL[p.chain_status ?? 'none']?.tip ?? ''}${p.chain_source ? ` · 来源：${CHAIN_SOURCE_LABEL[p.chain_source] ?? p.chain_source}` : ''}`}>
+                          <div className="text-fg-subtle">{chainText(p.chains)}</div>
+                          {(() => { const c = CHAIN_STATUS_LABEL[p.chain_status ?? 'none'] ?? CHAIN_STATUS_LABEL.none; return <div className={`text-[11px] ${c.cls}`}>{c.text}</div> })()}
+                          {p.maturity_status && p.maturity_status !== 'unknown' && <div className="text-[11px] text-fg-muted">{MATURITY_LABEL[p.maturity_status] ?? p.maturity_status}</div>}
+                        </td>
                         <td className="py-2 pr-3 text-right tabular-nums">{p.completeness != null ? `${Math.round(p.completeness * 100)}%` : '—'}</td>
                         <td className="py-2 pr-3 whitespace-nowrap" title={`最近事件 ${fmtAgo(p.last_event_at)} · 最近详情 ${fmtAgo(p.last_detail_at)} · 最近指标 ${fmtAgo(p.last_metric_at)}`}>
                           {(() => { const f = FRESHNESS_LABEL[p.freshness ?? 'expired'] ?? FRESHNESS_LABEL.expired; return <span className={f.cls}>{f.text}</span> })()}

@@ -46,7 +46,10 @@ interface Overview {
   chains: Chain[]
   providers: Provider[]
   budget: { surf: SurfBudget; helius: HeliusBudget; byTask: { task: string; trigger: string; credits: number; calls: number }[]; byEndpoint: EndpointStat[] }
-  settings: { surf_budget: SurfBudgetSetting; score_version: string; robinhood_review_gate: { enabled: boolean; validity_days: number; tge_validity_days: number } }
+  settings: {
+    surf_budget: SurfBudgetSetting; score_version: string; robinhood_review_gate: { enabled: boolean; validity_days: number; tge_validity_days: number }
+    pipeline_config?: PipelineConfig
+  }
   counts: { open_alerts: number; projects: number }
   last_selftest: Selftest | null
 }
@@ -263,6 +266,87 @@ function ProvidersTable({ providers }: { providers: Provider[] }) {
             })}
           </tbody>
         </table>
+      </div>
+    </Section>
+  )
+}
+
+interface PipelineConfig { dormant_days: number; archive_days: number; mature_market_cap_usd: number; mature_fdv_usd: number }
+interface BackfillResult {
+  skipped?: boolean; reason?: string; dryRun?: boolean; candidates?: number; estimated_credits_max?: number
+  status?: string; stats?: { surf_credits?: number; identity_backfill?: Record<string, number>; detail?: Record<string, number> }
+  error?: string
+}
+
+function IdentityBackfill() {
+  const qc = useQueryClient()
+  const [preview, setPreview] = useState<BackfillResult | null>(null)
+  const dry = useMutation({
+    mutationFn: () => sendJson<BackfillResult>('radar/identity-backfill', 'POST', { limit: 50, dryRun: true }),
+    onSuccess: setPreview,
+  })
+  const run = useMutation({
+    mutationFn: () => sendJson<BackfillResult>('radar/identity-backfill', 'POST', { limit: 50 }),
+    onSuccess: () => { setPreview(null); qc.invalidateQueries() },
+  })
+  const r = run.data
+  const bf = r?.stats?.identity_backfill ?? {}
+  return (
+    <Section title="身份补全（一次性）"
+      desc="对只有名称、从没在 Surf 搜过的项目各搜一次：唯一匹配 → 补全身份并重新评估；多个同名 → 放入待确认，不自动选；查不到 → 标记，出现新信号前不再付费查询。每日采集也会自动复查最多 5 个有新信号的项目。">
+      <div className="flex flex-wrap items-center gap-3">
+        <button onClick={() => dry.mutate()} disabled={dry.isPending || run.isPending}
+          className="rounded-md border border-border-strong px-3.5 py-1.5 text-sm hover:bg-bg-subtle-hover disabled:opacity-50">
+          {dry.isPending ? '计算中…' : '查看候选与预计点数'}
+        </button>
+        {preview && !preview.skipped && (
+          <>
+            <span className="text-sm">候选 {fmtNum(preview.candidates ?? 0)} 个，预计最多 {fmtNum(preview.estimated_credits_max ?? 0)} 点（搜索 1 点 / 个，找到的再取详情约 1 点）</span>
+            <button onClick={() => { if (window.confirm(`确认执行身份补全？预计最多消耗 ${preview.estimated_credits_max ?? 0} 点。`)) run.mutate() }}
+              disabled={run.isPending}
+              className="rounded-md bg-fg-base text-background px-3.5 py-1.5 text-sm font-semibold disabled:opacity-50">
+              {run.isPending ? '执行中…' : '执行'}
+            </button>
+          </>
+        )}
+        {preview?.skipped && <span className="text-sm text-fg-subtle">{preview.reason ?? '没有需要补全的项目'}</span>}
+      </div>
+      {r && (
+        <p className="text-sm mt-3">
+          {r.skipped ? (r.reason ?? '已跳过') : `完成：搜索 ${bf.searched ?? 0} 个，唯一匹配 ${bf.found ?? 0}，同名多个 ${bf.ambiguous ?? 0}，查不到 ${bf.not_found ?? 0}；消耗 ${fmtNum(Number(r.stats?.surf_credits ?? 0), 1)} 点。`}
+        </p>
+      )}
+      {(dry.isError || run.isError) && <p className="text-xs text-destructive mt-2">{((dry.error || run.error) as Error).message}</p>}
+    </Section>
+  )
+}
+
+function PipelineSettings({ setting }: { setting: PipelineConfig }) {
+  const qc = useQueryClient()
+  const [dormant, setDormant] = useState(String(setting.dormant_days))
+  const [archive, setArchive] = useState(String(setting.archive_days))
+  const [mcap, setMcap] = useState(String(setting.mature_market_cap_usd / 1e6))
+  const [fdv, setFdv] = useState(String(setting.mature_fdv_usd / 1e6))
+  const save = useMutation({
+    mutationFn: () => sendJson('system/settings/pipeline_config', 'PUT', {
+      value: { dormant_days: Number(dormant), archive_days: Number(archive), mature_market_cap_usd: Number(mcap) * 1e6, mature_fdv_usd: Number(fdv) * 1e6 },
+    }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['system-overview'] }),
+  })
+  const input = 'w-full rounded-md border border-border-base bg-transparent px-2.5 py-1.5 text-sm tabular-nums focus:outline-none focus:border-border-focus'
+  return (
+    <Section title="早期池规则" desc="保存后在下次评估（每日采集后，或项目池「重新评估」）生效。成熟项目 = 已上市且市值或 FDV 超过阈值。">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <label className="flex flex-col gap-1.5 text-xs text-fg-subtle">无新信号多少天休眠<input className={input} value={dormant} onChange={(e) => setDormant(e.target.value)} inputMode="numeric" /></label>
+        <label className="flex flex-col gap-1.5 text-xs text-fg-subtle">无新信号多少天归档<input className={input} value={archive} onChange={(e) => setArchive(e.target.value)} inputMode="numeric" /></label>
+        <label className="flex flex-col gap-1.5 text-xs text-fg-subtle">成熟市值阈值（百万美元）<input className={input} value={mcap} onChange={(e) => setMcap(e.target.value)} inputMode="numeric" /></label>
+        <label className="flex flex-col gap-1.5 text-xs text-fg-subtle">成熟 FDV 阈值（百万美元）<input className={input} value={fdv} onChange={(e) => setFdv(e.target.value)} inputMode="numeric" /></label>
+      </div>
+      <div className="flex items-center gap-3 mt-4">
+        <button onClick={() => save.mutate()} disabled={save.isPending}
+          className="rounded-md bg-fg-base text-background px-3.5 py-1.5 text-sm font-semibold disabled:opacity-50">{save.isPending ? '保存中…' : '保存'}</button>
+        {save.isSuccess && <span className="text-xs text-fg-subtle">已保存</span>}
+        {save.isError && <span className="text-xs text-destructive">{(save.error as Error).message}</span>}
       </div>
     </Section>
   )
@@ -645,8 +729,10 @@ export default function SystemPage() {
           <EndpointStats rows={data.budget.byEndpoint ?? []} />
           <ConflictQueue />
           <AmbiguityQueue />
+          <IdentityBackfill />
           <SelftestPanel last={data.last_selftest} />
           {data.settings.surf_budget && <BudgetSettings setting={data.settings.surf_budget} />}
+          {data.settings.pipeline_config && <PipelineSettings setting={data.settings.pipeline_config} />}
           <UsageLog />
         </>
       )}

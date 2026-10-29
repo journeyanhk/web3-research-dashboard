@@ -7,6 +7,7 @@ const registry = require('../registry')
 const { call, BudgetBlockedError } = require('../providers')
 const identity = require('../identity')
 const { recordMetric } = require('../metrics')
+const { raiseAlert } = require('../alerts')
 const x = require('./extract')
 
 const CORE_CHAINS = ['ethereum', 'bsc', 'base', 'arbitrum', 'solana', 'robinhood']
@@ -28,6 +29,7 @@ const DEFAULT_CONFIG = {
   resolve_per_run: 15, // 每次运行最多按名称查 Surf 身份的次数（1 点/次）
   detail_per_run: 10, // 每次运行最多补全项目详情的数量（1 点/个）
   research_cooldown_days: 7, // 同一项目按名称查找身份的冷却期
+  identity_recheck_per_run: 5, // M2.3：每次运行最多为「仅名称」项目查一次 Surf 身份（从未查过，或查过后又出现新信号）
 }
 
 const AIRDROP_STATUS_ZH = {
@@ -156,10 +158,11 @@ async function resolveByName(ctx, name, chains, source, { search = true } = {}) 
     if (existing) await db.query('UPDATE wr_projects SET surf_searched_at = now() WHERE id = $1', [existing.id])
   }
 
+  const chainSource = source === 'airdrop' ? 'airdrop_task' : 'inferred'
   if (existing) {
     let id = existing.id
     if (hit) id = await identity.attachIdentity(existing.id, { surfId: hit.id, symbol: hit.symbol, chains: hit.chains, source })
-    if (!hit && chains.length) await addChainsIfEmpty(id, chains)
+    if (chains.length) await identity.setChains(id, chains, chainSource)
     if (hit) {
       return { projectId: id, method: 'name_search', confidence: 'medium', created: false,
         evidence: { ...m.evidence, selection_reason: `${m.evidence.selection_reason}；Surf 名称完全一致，已补充 Surf ID` } }
@@ -169,7 +172,8 @@ async function resolveByName(ctx, name, chains, source, { search = true } = {}) 
       : { projectId: id, method: 'name', confidence: 'low', created: false, evidence: m.evidence }
   }
   if (hit) {
-    const u = await identity.upsertProject({ surfId: hit.id, name: hit.name, symbol: hit.symbol, chains: hit.chains, source })
+    const u = await identity.upsertProject({ surfId: hit.id, name: hit.name, symbol: hit.symbol, source })
+    if (chains.length) await identity.setChains(u.id, chains, chainSource)
     await db.query(
       `UPDATE wr_projects SET logo_url = COALESCE(logo_url, $2), description = COALESCE(description, $3), surf_searched_at = now() WHERE id = $1`,
       [u.id, hit.logo_url || null, hit.description || null],
@@ -177,19 +181,11 @@ async function resolveByName(ctx, name, chains, source, { search = true } = {}) 
     return { projectId: u.id, method: 'name_search', confidence: 'medium', created: u.created,
       evidence: { matched_name: norm, selection_reason: 'Surf 名称完全一致', surf_project_id: hit.id } }
   }
-  const u = await identity.upsertProject({ name, chains, source })
+  const u = await identity.upsertProject({ name, source })
+  if (chains.length) await identity.setChains(u.id, chains, chainSource)
   if (needSearch) await db.query('UPDATE wr_projects SET surf_searched_at = now() WHERE id = $1', [u.id])
   return { projectId: u.id, method: 'name', confidence: 'low', created: u.created,
     evidence: { matched_name: norm, selection_reason: u.created ? '无同名项目，Surf 中也未找到，仅名称建档' : '仅名称' } }
-}
-
-// 由标题推断的链只在项目还没有链信息时写入（低置信度，后续以项目详情为准）
-async function addChainsIfEmpty(projectId, chains) {
-  await db.query(
-    `UPDATE wr_projects SET chains = $2::jsonb, primary_chain = COALESCE(primary_chain, $3)
-     WHERE id = $1 AND jsonb_array_length(COALESCE(chains,'[]'::jsonb)) = 0`,
-    [projectId, JSON.stringify(chains), chains[0] || null],
-  )
 }
 
 // ───────── 融资 / 公募 ─────────
@@ -275,7 +271,8 @@ async function collectAirdrops(ctx) {
     if (!admit) { st.low_signal++; continue }
     let link
     if (it.project_id) {
-      const u = await identity.upsertProject({ surfId: it.project_id, name, symbol: it.coin_symbol, chains, source: 'airdrop' })
+      const u = await identity.upsertProject({ surfId: it.project_id, name, symbol: it.coin_symbol, source: 'airdrop' })
+      if (chains.length) await identity.setChains(u.id, chains, 'airdrop_task')
       if (it.logo_url) await db.query('UPDATE wr_projects SET logo_url = COALESCE(logo_url, $2) WHERE id = $1', [u.id, it.logo_url])
       link = { projectId: u.id, method: 'surf_id', confidence: 'high', created: u.created, evidence: { surf_project_id: it.project_id } }
     } else {
@@ -366,6 +363,76 @@ async function relinkNews(ctx) {
 }
 
 // ───────── 身份确认：为新项目拉项目详情（官网、X、合约、链、TGE 状态、代币数据）─────────
+// ───────── 「仅名称」项目的身份补全（M2.3）─────────
+// 候选：没有 Surf ID、身份仅名称的项目，且从未查过，或上次查过之后又出现了新信号（冷却期 7 天）。
+// 结果：唯一同名 → 补 Surf ID（随后补详情，再按 M2.3 规则重新评估，不直接进初筛）；
+//       多个同名 → 不自动选择，记为名称歧义提醒；查不到 → 标记，出现新信号前不再查。
+async function identityCandidates(limit, cooldownDays) {
+  return db.query(
+    `SELECT id, name FROM wr_projects
+     WHERE merged_into IS NULL AND surf_project_id IS NULL AND COALESCE(identity_status, 'name_only') = 'name_only'
+       AND (surf_searched_at IS NULL
+            OR (last_signal_at > surf_searched_at AND surf_searched_at < now() - ($2 || ' days')::interval))
+     ORDER BY last_signal_at DESC NULLS LAST, id DESC LIMIT $1`,
+    [limit, String(cooldownDays)],
+  )
+}
+
+const setFlag = (id, flag, on) => db.query(
+  on
+    ? `UPDATE wr_projects SET flags = (SELECT COALESCE(jsonb_agg(DISTINCT f), '[]'::jsonb)
+         FROM jsonb_array_elements(COALESCE(flags,'[]'::jsonb) || jsonb_build_array($2::text)) f) WHERE id = $1`
+    : `UPDATE wr_projects SET flags = COALESCE(flags,'[]'::jsonb) - $2::text WHERE id = $1`,
+  [id, flag])
+
+async function identityBackfill(ctx, limit = ctx.cfg.identity_recheck_per_run) {
+  const st = (ctx.stats.identity_backfill = { candidates: 0, searched: 0, found: 0, ambiguous: 0, not_found: 0, merged: 0, errors: 0 })
+  if (!limit) return
+  const rows = await identityCandidates(limit, ctx.cfg.research_cooldown_days)
+  st.candidates = rows.length
+  for (const p of rows) {
+    if (ctx.budgetBlocked) break
+    const norm = identity.normalizeName(p.name)
+    let items
+    try {
+      const r = await surf(ctx, 'search/project', { q: p.name, limit: 5 },
+        { task: 'identity_backfill', cacheTtlSec: 7 * 86400, projectId: p.id })
+      items = r.body?.data || []
+      st.searched++
+    } catch (e) {
+      if (e instanceof BudgetBlockedError) { if (e.scope === 'project') continue; break }
+      st.errors++
+      continue
+    }
+    await db.query('UPDATE wr_projects SET surf_searched_at = now() WHERE id = $1', [p.id])
+    const exact = items.filter((h) => h?.id && (identity.normalizeName(h.name) === norm || identity.normalizeName(h.slug) === norm))
+    const uniq = [...new Map(exact.map((h) => [h.id, h])).values()]
+    if (uniq.length === 1) {
+      const hit = uniq[0]
+      const finalId = await identity.attachIdentity(p.id, { surfId: hit.id, symbol: hit.symbol, source: 'identity_backfill' })
+      if (finalId !== p.id) st.merged++
+      await db.query(
+        `UPDATE wr_projects SET logo_url = COALESCE(logo_url, $2), description = COALESCE(description, $3),
+           tags = COALESCE(tags, $4::jsonb) WHERE id = $1`,
+        [finalId, hit.logo_url || null, hit.description || null, Array.isArray(hit.tags) ? JSON.stringify(hit.tags.slice(0, 10)) : null])
+      for (const f of ['surf_not_found', 'surf_multiple_matches']) await setFlag(finalId, f, false)
+      st.found++
+      ctx.touched.add(finalId)
+    } else if (uniq.length > 1) {
+      await setFlag(p.id, 'surf_multiple_matches', true)
+      await raiseAlert({
+        category: 'identity', type: 'identity_ambiguous', projectId: p.id, dedupeKey: `identity_ambiguous:${p.id}`,
+        title: `${p.name}：Surf 中有 ${uniq.length} 个同名项目，需人工确认`,
+        detail: { candidates: uniq.map((h) => ({ surf_project_id: h.id, name: h.name, slug: h.slug, tags: h.tags || [] })) },
+      })
+      st.ambiguous++
+    } else {
+      await setFlag(p.id, 'surf_not_found', true)
+      st.not_found++
+    }
+  }
+}
+
 async function enrichDetails(ctx) {
   const st = (ctx.stats.detail = { candidates: 0, fetched: 0, merged: 0, tge_events: 0, errors: 0 })
   const rows = await detailCandidates(ctx.cfg.detail_per_run)
@@ -402,6 +469,12 @@ async function enrichDetails(ctx) {
       contracts, chains: [...(d.overview?.chains || []), ...contracts.map((c) => c.chain)], symbol: d.overview?.token_symbol || d.token_info?.symbol, source: 'project_detail',
     })
     if (finalId !== p.id) st.merged++
+    // 项目详情里的链（含合约所在链）是已确认的链信息，覆盖文字推断 / 空投任务推断的链
+    const detailChains = [...(d.overview?.chains || []), ...contracts.map((c) => c.chain)]
+    if (detailChains.length) await identity.setChains(finalId, detailChains, 'surf_detail')
+    if (Array.isArray(d.overview?.tags) && d.overview.tags.length) {
+      await db.query('UPDATE wr_projects SET tags = $2::jsonb WHERE id = $1', [finalId, JSON.stringify(d.overview.tags.slice(0, 10))])
+    }
     const tge = d.tge_status || {}
     const tgeStatus = tge.current_status || d.overview?.tge_status || null
     await db.query(
@@ -466,11 +539,33 @@ async function refreshChainPriority() {
      WHERE merged_into IS NULL`,
     [CORE_CHAINS],
   )
+  await refreshSignals()
   await db.query(
     `UPDATE wr_projects p SET last_event_at = e.m
      FROM (SELECT project_id, max(event_at) m FROM wr_events WHERE project_id IS NOT NULL GROUP BY 1) e
      WHERE p.id = e.project_id AND (p.last_event_at IS NULL OR p.last_event_at < e.m)`,
   )
+}
+
+/**
+ * M2.3（不花点数）：
+ * 1) 还没有链信息的项目，从项目简介里推断链（只算「待核实链」，不能直接进初筛）
+ * 2) 最近一次有效信号：已关联、未被排除、非新闻的事件中，最晚被系统观察到的时间（没有则取首次发现时间）
+ */
+async function refreshSignals() {
+  const rows = await db.query(
+    `SELECT id, description FROM wr_projects
+     WHERE merged_into IS NULL AND description IS NOT NULL AND jsonb_array_length(COALESCE(chains,'[]'::jsonb)) = 0`)
+  for (const r of rows) {
+    const chains = x.detectChains(r.description)
+    if (chains.length) await identity.setChains(r.id, chains, 'inferred')
+  }
+  await db.query(
+    `UPDATE wr_projects p SET last_signal_at = GREATEST(p.first_seen_at, e.m)
+     FROM (SELECT p2.id, (SELECT max(e.created_at) FROM wr_events e
+                          WHERE e.project_id = p2.id AND e.excluded_reason IS NULL AND e.event_type <> 'news') AS m
+           FROM wr_projects p2 WHERE p2.merged_into IS NULL) e
+     WHERE p.id = e.id AND p.last_signal_at IS DISTINCT FROM GREATEST(p.first_seen_at, e.m)`)
 }
 
 let running = null
@@ -501,56 +596,88 @@ async function runDiscovery({ trigger = 'auto', dryRun = false } = {}) {
   return running
 }
 
+const DISCOVERY_STEPS = [
+  ['融资', collectFundraising], ['空投', collectAirdrops], ['上币', collectListings], ['新闻', collectNews],
+  ['身份补全', (ctx) => identityBackfill(ctx)], ['身份确认', enrichDetails], ['新闻关联', relinkNews],
+]
+
 async function doRun(trigger) {
-  {
-    const cfg = await loadConfig()
-    const run = await db.one(`INSERT INTO wr_job_runs (job, trigger, status, instance) VALUES ('discovery', $1, 'running', $2) RETURNING id`,
-      [trigger, instanceName()])
-    const ctx = {
-      trigger, cfg, budgetBlocked: null, resolveLeft: cfg.resolve_per_run, touched: new Set(),
-      stats: { identity: { searched: 0, errors: 0 } }, errors: [],
-    }
-    const creditsBefore = await db.one(
-      `SELECT COALESCE(sum(actual_credits),0)::float c FROM wr_api_usage WHERE provider = 'surf'`)
-    const steps = [
-      ['融资', collectFundraising], ['空投', collectAirdrops], ['上币', collectListings], ['新闻', collectNews],
-      ['身份确认', enrichDetails], ['新闻关联', relinkNews],
-    ]
-    for (const [label, fn] of steps) {
-      try {
-        await fn(ctx)
-      } catch (e) {
-        ctx.errors.push(`${label}：${e.message}`)
-      }
-    }
-    try { await refreshChainPriority() } catch (e) { ctx.errors.push(`链优先级：${e.message}`) }
-    // M2：采集后重新评估项目阶段（只读数据库，不花点数）
+  return runJob({ job: 'discovery', trigger, steps: DISCOVERY_STEPS })
+}
+
+// 通用采集任务：记录运行、逐步执行（单步失败不影响其他步骤）、刷新链与信号、重新评估阶段、统计点数
+async function runJob({ job, trigger, steps, cfgOverride = {} }) {
+  const cfg = { ...(await loadConfig()), ...cfgOverride }
+  const run = await db.one(`INSERT INTO wr_job_runs (job, trigger, status, instance) VALUES ($1, $2, 'running', $3) RETURNING id`,
+    [job, trigger, instanceName()])
+  const ctx = {
+    trigger, cfg, budgetBlocked: null, resolveLeft: cfg.resolve_per_run, touched: new Set(),
+    stats: { identity: { searched: 0, errors: 0 } }, errors: [],
+  }
+  const creditsBefore = await db.one(
+    `SELECT COALESCE(sum(actual_credits),0)::float c FROM wr_api_usage WHERE provider = 'surf'`)
+  for (const [label, fn] of steps) {
     try {
-      const ev = await require('../pipeline').evaluateProjects()
-      ctx.stats.pipeline = { evaluated: ev.evaluated, changed: ev.changed.length,
-        to_screening: ev.changed.filter((c) => c.to === 'screening').length }
-    } catch (e) { ctx.errors.push(`阶段评估：${e.message}`) }
-    const creditsAfter = await db.one(
-      `SELECT COALESCE(sum(actual_credits),0)::float c FROM wr_api_usage WHERE provider = 'surf'`)
-    const stats = { ...ctx.stats, surf_credits: +(creditsAfter.c - creditsBefore.c).toFixed(2), budget_blocked: ctx.budgetBlocked, errors: ctx.errors }
-    const status = ctx.errors.length === 0 && !ctx.budgetBlocked ? 'ok' : ctx.errors.length >= steps.length ? 'error' : 'partial'
-    await db.query(
-      `UPDATE wr_job_runs SET status = $2, finished_at = now(), stats = $3, error = $4 WHERE id = $1`,
-      [run.id, status, JSON.stringify(stats), ctx.errors.join('\n') || null],
-    )
+      await fn(ctx)
+    } catch (e) {
+      ctx.errors.push(`${label}：${e.message}`)
+    }
+  }
+  try { await refreshChainPriority() } catch (e) { ctx.errors.push(`链优先级：${e.message}`) }
+  // 采集后重新评估项目阶段（只读数据库，不花点数）
+  try {
+    const ev = await require('../pipeline').evaluateProjects()
+    ctx.stats.pipeline = { evaluated: ev.evaluated, changed: ev.changed.length,
+      to_screening: ev.changed.filter((c) => c.to === 'screening').length }
+  } catch (e) { ctx.errors.push(`阶段评估：${e.message}`) }
+  const creditsAfter = await db.one(
+    `SELECT COALESCE(sum(actual_credits),0)::float c FROM wr_api_usage WHERE provider = 'surf'`)
+  const stats = { ...ctx.stats, surf_credits: +(creditsAfter.c - creditsBefore.c).toFixed(2), budget_blocked: ctx.budgetBlocked, errors: ctx.errors }
+  const status = ctx.errors.length === 0 && !ctx.budgetBlocked ? 'ok' : ctx.errors.length >= steps.length ? 'error' : 'partial'
+  await db.query(
+    `UPDATE wr_job_runs SET status = $2, finished_at = now(), stats = $3, error = $4 WHERE id = $1`,
+    [run.id, status, JSON.stringify(stats), ctx.errors.join('\n') || null],
+  )
+  if (job === 'discovery') {
     const prev = (await registry.get('job', 'discovery')) || {}
     await registry.set('job', 'discovery', {
       ...prev, last_run_id: run.id, last_run_at: new Date().toISOString(), last_status: status,
       news_watermark: ctx.newsWatermark || prev.news_watermark || null,
     })
-    return { runId: run.id, status, stats }
   }
+  return { runId: run.id, status, stats }
+}
+
+/**
+ * 一次性身份补全（M2.3，人工触发）：为「仅名称」项目各查一次 Surf（1 点/个），
+ * 找到的项目顺带补详情（1 点/个）。与每日采集共用同一把锁，避免并发。
+ */
+async function runIdentityBackfill({ limit = 30, trigger = 'manual', dryRun = false } = {}) {
+  if (running) return { skipped: true, reason: '本进程已有采集任务在运行' }
+  const n = Math.min(Math.max(Number(limit) || 0, 1), 50)
+  running = (async () => {
+    const lock = await db.lock(LOCK_KEY, 1800)
+    if (!lock) return { skipped: true, reason: '其他环境正在采集（数据库锁被占用）' }
+    try {
+      const cfg = await loadConfig()
+      const candidates = await identityCandidates(n, cfg.research_cooldown_days)
+      if (dryRun || !candidates.length) return { skipped: !candidates.length, dryRun, candidates: candidates.length, estimated_credits_max: candidates.length * 2 }
+      return await runJob({
+        job: 'identity_backfill', trigger,
+        cfgOverride: { detail_per_run: candidates.length },
+        steps: [['身份补全', (ctx) => identityBackfill(ctx, n)], ['身份确认', enrichDetails]],
+      })
+    } finally {
+      await lock.release()
+    }
+  })().finally(() => { running = null })
+  return running
 }
 
 const isRunning = () => !!running
 
 module.exports = {
-  runDiscovery, isRunning, DEFAULT_CONFIG, CORE_CHAINS, EXTRACTION_RULE_VERSION, LOCK_KEY,
+  runDiscovery, runIdentityBackfill, isRunning, DEFAULT_CONFIG, CORE_CHAINS, EXTRACTION_RULE_VERSION, LOCK_KEY,
   // 供自检使用的内部函数
-  _internal: { resolveByName, matchByName, insertEvent, linkEvent, surf, detailCandidates, markDetailNotFound, nextWatermark },
+  _internal: { identityCandidates, identityBackfill, refreshSignals, resolveByName, matchByName, insertEvent, linkEvent, surf, detailCandidates, markDetailNotFound, nextWatermark },
 }

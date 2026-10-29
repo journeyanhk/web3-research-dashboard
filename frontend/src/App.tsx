@@ -24,7 +24,7 @@ function readHash(): Route {
   const path = window.location.hash.replace(/^#\/?/, '')
   const m = /^projects\/(\d+)/.exec(path)
   if (m) return { page: 'projects', projectId: Number(m[1]) }
-  const k = path.split('/')[0] as PageKey
+  const k = path.split(/[/?]/)[0] as PageKey
   return { page: NAV.some((n) => n.key === k) ? k : 'radar' }
 }
 

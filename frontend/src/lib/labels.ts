@@ -9,12 +9,36 @@ export const STAGE_LABEL: Record<string, string> = {
   discovered: '发现', pending_verify: '待验证', data_incomplete: '数据待补全', data_conflict: '数据冲突', screening: '初筛',
   deep_research: '深度尽调', watch: '重点观察', tge_plan: 'TGE 计划', tge_exec: 'TGE 执行', holding: '持仓观察',
   exited: '退出', review: '复盘', rejected: '淘汰', merged: '已合并',
+  opportunity_chain: '机会链', listed_watch: '已上市观察', non_early: '非早期项目', dormant: '休眠', archived: '归档',
 }
 export const STAGE_ORDER = [
   'discovered', 'pending_verify', 'data_incomplete', 'data_conflict', 'screening', 'deep_research', 'watch',
   'tge_plan', 'tge_exec', 'holding', 'exited', 'review', 'rejected',
+  'opportunity_chain', 'listed_watch', 'non_early', 'dormant', 'archived',
 ]
-export const AUTO_STAGES = new Set(['discovered', 'pending_verify', 'data_incomplete', 'data_conflict', 'screening'])
+export const AUTO_STAGES = new Set([
+  'discovered', 'pending_verify', 'data_incomplete', 'data_conflict', 'screening',
+  'opportunity_chain', 'listed_watch', 'non_early', 'dormant', 'archived',
+])
+// 早期池之外的阶段（M2.3）：数据保留，但不算早期研究对象
+export const OUT_OF_POOL_STAGES = new Set(['opportunity_chain', 'listed_watch', 'non_early', 'dormant', 'archived'])
+
+export const MATURITY_LABEL: Record<string, string> = {
+  early: '早期', pre_tge: 'TGE 前', listed: '已上市', mature: '成熟项目', chain_infrastructure: '公链 / L2 本身', unknown: '未知',
+}
+export const CHAIN_STATUS_LABEL: Record<string, { text: string; cls: string; tip: string }> = {
+  core_confirmed: { text: '核心链已确认', cls: 'text-fg-base', tip: '来源为人工确认、Surf 详情或空投任务，且属于 6 条核心链' },
+  other_confirmed: { text: '其他链已确认', cls: 'text-[var(--color-tag-yellow-100)]', tip: '已确认所在链，但不在 6 条核心链内' },
+  inferred: { text: '链待核实', cls: 'text-[var(--color-tag-orange-100)]', tip: '链只是从名称 / 描述文字推断的，需要核实' },
+  none: { text: '无链信息', cls: 'text-fg-muted', tip: '没有任何所属链信息' },
+}
+export const CHAIN_SOURCE_LABEL: Record<string, string> = {
+  manual: '人工确认', surf_detail: 'Surf 详情', airdrop_task: '空投任务', inferred: '文字推断',
+}
+export const GROUP_LABEL: Record<string, string> = {
+  surf_project: 'Surf 项目数据', surf_fundraising: 'Surf 融资数据', official_project: '官方 / 人工确认',
+  onchain: '链上数据', github: 'GitHub', market_data: '市场数据', external_news: '外部新闻',
+}
 
 export const SOURCE_LABEL: Record<string, string> = {
   fundraising: '融资', public_sale: '公募', airdrop: '空投', listing: '上币', news: '新闻', tge: 'TGE',

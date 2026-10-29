@@ -13,7 +13,7 @@ const wrap = (fn) => (req, res) => fn(req, res).catch((e) => {
   res.status(500).json({ error: e.message })
 })
 
-const EDITABLE = new Set(['surf_budget', 'helius_budget', 'coverage_weights', 'robinhood_review_gate', 'discovery_config'])
+const EDITABLE = new Set(['surf_budget', 'helius_budget', 'coverage_weights', 'robinhood_review_gate', 'discovery_config', 'pipeline_config'])
 
 router.get('/overview', wrap(async (_req, res) => {
   await registry.ensureSeeded()
@@ -63,6 +63,7 @@ router.get('/overview', wrap(async (_req, res) => {
       helius_budget: await registry.getSetting('helius_budget'),
       coverage_weights: weights, robinhood_review_gate: gate,
       score_version: await registry.getSetting('score_version'),
+      pipeline_config: { ...require('../lib/pipeline').DEFAULT_PIPELINE_CONFIG, ...((await registry.getSetting('pipeline_config')) || {}) },
     },
     counts: { open_alerts: openAlerts.c, projects: projects.c },
     last_selftest: lastSelftest,
@@ -93,6 +94,10 @@ router.put('/settings/:key', wrap(async (req, res) => {
   if (key === 'coverage_weights') {
     const sum = Object.values(value).reduce((a, b) => a + Number(b), 0)
     if (Math.abs(sum - 1) > 0.001) return res.status(400).json({ error: `权重合计需为 1（当前 ${sum.toFixed(2)}）` })
+  }
+  if (key === 'pipeline_config') {
+    const d = Number(value.dormant_days); const a = Number(value.archive_days)
+    if (!(d >= 1) || !(a > d)) return res.status(400).json({ error: '休眠天数需 ≥ 1，归档天数需大于休眠天数' })
   }
   await registry.set('setting', key, value)
   res.json({ ok: true })

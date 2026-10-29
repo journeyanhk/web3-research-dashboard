@@ -336,34 +336,118 @@ async function boundaryTests(results) {
     // ───── 漏斗（M2）─────
     const pipeline = require('./pipeline')
     const base = (o = {}) => ({
-      identity: 'confirmed', conflict: false,
+      project: { name: `自检项目${tag}`, tge_status: null }, tags: [], metrics: {}, flags: [], evidence: [],
+      identity: 'confirmed', conflict: false, chainStatus: 'core_confirmed', chains: ['base'], chainSource: 'surf_detail',
+      qualityFunding: false, productLevel: null, lastSignalAt: new Date().toISOString(),
       hard: { credible_funding: false, verifiable_product: false, token_plan: false, onchain_activity: null, ecosystem_integration: null },
       bonus: { core_chain: false, multi_source: false, active_campaign: false, social_traction: false },
       completeness: {}, origins: {}, ...o,
     })
-    await step(results, '漏斗', '证据只来自空投一个来源 → 不进初筛', async () => {
+    // 满足条件的组合：融资（Surf 融资数据）+ 核心链（Surf 项目数据）= 2 个独立来源
+    const ok2 = () => ({
+      hard: { ...base().hard, credible_funding: true }, bonus: { ...base().bonus, core_chain: true },
+      origins: { credible_funding: ['surf_fundraising'], core_chain: ['surf_project'] },
+    })
+    await step(results, '漏斗', '同一条记录的多个字段只算 1 个来源 → 不进初筛', async () => {
       const d = pipeline.decideStage(base({
         hard: { ...base().hard, verifiable_product: true }, bonus: { ...base().bonus, active_campaign: true },
-        origins: { verifiable_product: ['airdrop'], active_campaign: ['airdrop'] },
+        origins: { verifiable_product: ['surf_project'], active_campaign: ['surf_project'] },
       }))
-      assert(d.stage === 'pending_verify', `进入了 ${d.stage}`)
+      assert(d.stage === 'pending_verify' && d.facts.independence_groups.length === 1, `进入了 ${d.stage}，独立来源 ${d.facts.independence_groups.length}`)
       return `→ 待验证：${d.reason}`
     })
-    await step(results, '漏斗', '硬条件 + 加分且 2 个独立来源 → 初筛', async () => {
+    await step(results, '漏斗', '「多个独立数据集」本身不额外算一个来源', async () => {
       const d = pipeline.decideStage(base({
-        hard: { ...base().hard, credible_funding: true }, bonus: { ...base().bonus, core_chain: true },
-        origins: { credible_funding: ['fundraising'], core_chain: ['detail'] },
+        hard: { ...base().hard, credible_funding: true }, bonus: { ...base().bonus, multi_source: true },
+        origins: { credible_funding: ['surf_fundraising'], multi_source: ['surf_project'] },
       }))
-      assert(d.stage === 'screening', `进入了 ${d.stage}`)
-      return '→ 初筛'
+      assert(d.stage !== 'screening' && d.facts.independence_groups.length === 1, `进入了 ${d.stage}`)
+      return `只有 1 个独立来源 → ${d.stage}`
+    })
+    await step(results, '漏斗', '硬条件 + 加分 + 2 个独立来源 + 核心链已确认 → 初筛', async () => {
+      const d = pipeline.decideStage(base(ok2()))
+      assert(d.stage === 'screening' && d.facts.qualifies, `进入了 ${d.stage}`)
+      assert(d.facts.screening_rule_version === pipeline.SCREENING_RULE_VERSION, '快照缺少初筛口径版本')
+      return `→ 初筛（口径 ${d.facts.screening_rule_version}）`
+    })
+    await step(results, '漏斗', '链状态：推断 → 待验证；无链 → 待补全；其他链 → 机会链', async () => {
+      const a = pipeline.decideStage(base({ ...ok2(), chainStatus: 'inferred' }))
+      const b = pipeline.decideStage(base({ ...ok2(), chainStatus: 'none', chains: [] }))
+      const c = pipeline.decideStage(base({ ...ok2(), chainStatus: 'other_confirmed', chains: ['hyperliquid'] }))
+      const e = pipeline.decideStage(base({ chainStatus: 'none', chains: [], qualityFunding: true, productLevel: 'high' }))
+      assert(a.stage === 'pending_verify' && b.stage === 'data_incomplete' && c.stage === 'opportunity_chain', `结果：${a.stage} / ${b.stage} / ${c.stage}`)
+      assert(e.stage === 'pending_verify' && e.facts.focus === true, `高质量融资 + 产品但无链应为待验证重点，实际 ${e.stage}`)
+      assert(pipeline.chainStatusOf(['base'], 'inferred') === 'inferred' && pipeline.chainStatusOf(['base'], 'manual') === 'core_confirmed'
+        && pipeline.chainStatusOf(['sui'], 'surf_detail') === 'other_confirmed' && pipeline.chainStatusOf([], 'manual') === 'none', '链状态计算错误')
+      return '推断链 → 待验证；无链 → 数据待补全；其他链 → 机会链；无链但融资 + 产品 → 待验证重点'
+    })
+    await step(results, '漏斗', '成熟度：成熟 / 公链本身 → 非早期；已上市 → 已上市观察；新 L2 → 机会链', async () => {
+      const m = pipeline.decideStage(base({ ...ok2(), project: { name: 'X', tge_status: 'post' }, metrics: { market_cap_usd: 5e8 } }))
+      const l = pipeline.decideStage(base({ ...ok2(), project: { name: 'X', tge_status: 'post' }, metrics: { market_cap_usd: 2e7 } }))
+      const k = pipeline.decideStage(base({ ...ok2(), project: { name: 'Base', tge_status: null } }))
+      const n = pipeline.decideStage(base({ ...ok2(), tags: ['Layer2 & Scaling'] }))
+      assert(m.stage === 'non_early' && m.facts.maturity === 'mature', `成熟项目：${m.stage}`)
+      assert(l.stage === 'listed_watch' && l.facts.maturity === 'listed', `已上市：${l.stage}`)
+      assert(k.stage === 'non_early' && k.facts.maturity === 'chain_infrastructure', `核心链本身：${k.stage}`)
+      assert(n.stage === 'opportunity_chain', `新 L2：${n.stage}`)
+      return '市值 5 亿 → 非早期；市值 2000 万 → 已上市观察；Base → 非早期；L2 标签 → 机会链'
+    })
+    await step(results, '漏斗', '休眠 / 归档阈值：14 天休眠，30 天归档，初筛不自动休眠', async () => {
+      const ago = (d) => new Date(Date.now() - d * 86400000).toISOString()
+      const a = pipeline.decideStage(base({ lastSignalAt: ago(13) }))
+      const b = pipeline.decideStage(base({ lastSignalAt: ago(15) }))
+      const c = pipeline.decideStage(base({ lastSignalAt: ago(31) }))
+      const d = pipeline.decideStage(base({ ...ok2(), lastSignalAt: ago(60) }))
+      assert(a.stage === 'discovered' && b.stage === 'dormant' && c.stage === 'archived' && d.stage === 'screening',
+        `结果：${a.stage} / ${b.stage} / ${c.stage} / ${d.stage}`)
+      assert(b.facts.would_be_stage === 'discovered', '休眠时没有记录原阶段')
+      return '13 天 → 发现；15 天 → 休眠；31 天 → 归档；初筛 60 天仍为初筛'
     })
     await step(results, '漏斗', '身份只有名称 → 数据待补全；有冲突 → 数据冲突', async () => {
-      const full = { hard: { ...base().hard, credible_funding: true }, bonus: { ...base().bonus, core_chain: true },
-        origins: { credible_funding: ['fundraising'], core_chain: ['detail'] } }
-      const a = pipeline.decideStage(base({ ...full, identity: 'name_only' }))
-      const b = pipeline.decideStage(base({ ...full, conflict: true }))
+      const a = pipeline.decideStage(base({ ...ok2(), identity: 'name_only' }))
+      const b = pipeline.decideStage(base({ ...ok2(), conflict: true }))
       assert(a.stage === 'data_incomplete' && b.stage === 'data_conflict', `结果：${a.stage} / ${b.stage}`)
       return '条件都满足时，仅名称 → 数据待补全，有冲突 → 数据冲突'
+    })
+    await step(results, '漏斗', '快照只在结果变化时追加；新信号自动从归档恢复', async () => {
+      await db.query(`UPDATE wr_projects SET first_seen_at = now() - interval '40 days', last_signal_at = now() - interval '40 days' WHERE id = $1`, [p2])
+      await pipeline.evaluateProjects([p2])
+      await pipeline.evaluateProjects([p2])
+      const r1 = await db.one('SELECT stage FROM wr_projects WHERE id = $1', [p2])
+      const s1 = await db.one('SELECT count(*)::int c FROM wr_screening_snapshots WHERE project_id = $1', [p2])
+      assert(r1.stage === 'archived', `40 天无信号应归档，实际 ${r1.stage}`)
+      assert(s1.c === 1, `连续评估两次应只有 1 条快照，实际 ${s1.c}`)
+      const ev = await D.insertEvent({ type: 'fundraising', externalId: `${tag}-react`, title: 'selftest' })
+      await D.linkEvent(ev, { projectId: p2, method: 'name', confidence: 'low' })
+      await D.refreshSignals()
+      const ch = await pipeline.evaluateProjects([p2])
+      const r2 = await db.one('SELECT stage, reactivated_at, stage_reason FROM wr_projects WHERE id = $1', [p2])
+      const s2 = await db.one('SELECT count(*)::int c FROM wr_screening_snapshots WHERE project_id = $1', [p2])
+      assert(r2.stage !== 'archived' && r2.reactivated_at && /重新激活/.test(r2.stage_reason || ''), `没有自动恢复：${r2.stage}`)
+      assert(ch.changed[0]?.reactivated === true && s2.c === 2, `快照 ${s2.c} 条`)
+      return `归档 → 新融资事件 → ${r2.stage}（已标记重新激活），快照 1 → 2 条`
+    })
+    await step(results, '漏斗', '人工确认链：来源记为人工、留痕备注、立即重新评估', async () => {
+      await pipeline.confirmChains(p2, ['base'], '自检')
+      const r = await db.one('SELECT chains, chain_source, chain_status FROM wr_projects WHERE id = $1', [p2])
+      const n = await db.one(`SELECT count(*)::int c FROM wr_notes WHERE project_id = $1 AND body LIKE '人工确认所属链%'`, [p2])
+      assert(r.chain_source === 'manual' && r.chain_status === 'core_confirmed' && (r.chains || []).includes('base'), `结果：${JSON.stringify(r)}`)
+      assert(n.c === 1, '没有写备注')
+      let threw = false
+      try { await pipeline.confirmChains(p2, []) } catch { threw = true }
+      assert(threw, '空链列表应被拒绝')
+      return '链 = base，来源人工确认，状态核心链已确认，已写备注'
+    })
+    await step(results, '漏斗', '身份补全候选：只选从没搜过的仅名称项目；搜过且无新信号的不再查', async () => {
+      const p3 = (await db.one(`INSERT INTO wr_projects (name, discovery_source) VALUES ($1, 'selftest_tmp') RETURNING id`, [`WR自检补全${tag}`])).id
+      tmp.push(p3)
+      let c = await D.identityCandidates(100000, 7)
+      assert(c.some((r) => r.id === p3), '未搜过的仅名称项目不在候选中')
+      await db.query(`UPDATE wr_projects SET surf_searched_at = now() WHERE id = $1`, [p3])
+      c = await D.identityCandidates(100000, 7)
+      assert(!c.some((r) => r.id === p3), '刚搜过的项目仍在候选中')
+      assert(require('./identity').PROJECT_REF_TABLES.includes('wr_screening_snapshots'), '合并项目时没有迁移初筛快照')
+      return '未搜过 → 候选；搜过后移出；合并时快照随项目迁移'
     })
     await step(results, '漏斗', '人工设定的阶段不会被自动评估改掉', async () => {
       await pipeline.setStageManual(p1, 'watch', '自检：人工设为重点观察')
@@ -381,6 +465,7 @@ async function boundaryTests(results) {
   } finally {
     if (tmp.length) {
       await db.query('DELETE FROM wr_stage_history WHERE project_id = ANY($1)', [tmp])
+      await db.query('DELETE FROM wr_screening_snapshots WHERE project_id = ANY($1)', [tmp])
       await db.query('DELETE FROM wr_notes WHERE project_id = ANY($1)', [tmp])
       await db.query('DELETE FROM wr_events WHERE external_id LIKE $1 OR project_id = ANY($2)', [`${tag}%`, tmp])
       await db.query('DELETE FROM wr_alerts WHERE project_id = ANY($1)', [tmp])

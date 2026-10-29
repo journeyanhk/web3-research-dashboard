@@ -7,7 +7,8 @@ const { Cron } = require('croner')
 const db = require('../lib/db')
 const registry = require('../lib/registry')
 const { identityStatus } = require('../lib/identity')
-const { runDiscovery, isRunning, CORE_CHAINS } = require('../lib/collect/discovery')
+const { runDiscovery, runIdentityBackfill, isRunning, CORE_CHAINS } = require('../lib/collect/discovery')
+const { CHAIN_MISSING_SQL } = require('../lib/projectQuery')
 
 const scheduler = require('../lib/scheduler')
 
@@ -52,6 +53,16 @@ router.get('/overview', wrap(async (req, res) => {
     [chain],
   )
   const conflicts = await db.one("SELECT count(*)::int c FROM wr_project_relations WHERE status = 'possible_duplicate'")
+  // M2.3 漏斗：按阶段计数 + 「只差确认链」「待验证重点」
+  const stageRows = await db.query(
+    `SELECT stage, count(*)::int c FROM wr_projects WHERE merged_into IS NULL AND ($1::text IS NULL OR chains ? $1) GROUP BY 1`, [chain])
+  const gates = await db.one(
+    `SELECT count(*) FILTER (WHERE ${CHAIN_MISSING_SQL})::int AS chain_missing,
+            count(*) FILTER (WHERE (p.screening_facts->>'focus') = 'true')::int AS focus,
+            count(*) FILTER (WHERE p.identity_status = 'name_only')::int AS name_only
+     FROM wr_projects p WHERE p.merged_into IS NULL`)
+  const lastBackfill = await db.one(
+    `SELECT id, trigger, status, started_at, finished_at, stats, error FROM wr_job_runs WHERE job = 'identity_backfill' ORDER BY id DESC LIMIT 1`)
   const credits = await db.one(
     `SELECT COALESCE(sum(actual_credits),0)::float c FROM wr_api_usage
      WHERE provider = 'surf' AND created_at >= date_trunc('day', now()) AND task LIKE ANY (ARRAY['discovery_%','identity_%'])`,
@@ -97,8 +108,9 @@ router.get('/overview', wrap(async (req, res) => {
 
   res.json({
     chain,
-    summary: { ...summary, open_conflicts: conflicts.c, surf_credits_today: credits.c },
-    last_run: lastRun, running: isRunning(), schedule: nextCronRun(), scheduler: scheduler.status(),
+    summary: { ...summary, open_conflicts: conflicts.c, surf_credits_today: credits.c, ...gates },
+    funnel: Object.fromEntries(stageRows.map((r) => [r.stage, r.c])),
+    last_run: lastRun, last_backfill: lastBackfill, running: isRunning(), schedule: nextCronRun(), scheduler: scheduler.status(),
     projects, fundraising, airdrops, listings, tge, news,
   })
 }))
@@ -157,6 +169,13 @@ router.get('/quality', wrap(async (_req, res) => {
 router.post('/run', wrap(async (_req, res) => {
   if (isRunning()) return res.status(409).json({ error: '采集正在进行中，请稍后' })
   const r = await runDiscovery({ trigger: 'manual' })
+  res.json(r)
+}))
+
+// 一次性身份补全（M2.3）：对只有名称的项目各搜一次 Surf。dryRun=true 只返回候选数和预计点数，不花点数
+router.post('/identity-backfill', wrap(async (req, res) => {
+  if (isRunning()) return res.status(409).json({ error: '采集正在进行中，请稍后' })
+  const r = await runIdentityBackfill({ limit: Number(req.body?.limit) || 30, dryRun: !!req.body?.dryRun })
   res.json(r)
 }))
 

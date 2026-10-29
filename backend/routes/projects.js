@@ -89,7 +89,11 @@ router.post('/events/:id/link', wrap(async (req, res) => {
 // ───────── 项目池（M2）─────────
 
 router.get('/meta', wrap(async (_req, res) => {
-  res.json({ stages: pipeline.STAGES, completeness: pipeline.COMPLETENESS_ITEMS })
+  res.json({
+    stages: pipeline.STAGES, completeness: pipeline.COMPLETENESS_ITEMS,
+    maturity: pipeline.MATURITY_LABEL, chain_status: pipeline.CHAIN_STATUS_LABEL, chain_source: pipeline.CHAIN_SOURCE_LABEL,
+    groups: pipeline.GROUP_LABEL, core_chains: pipeline.CORE_CHAINS, screening_rule_version: pipeline.SCREENING_RULE_VERSION,
+  })
 }))
 
 router.get('/', wrap(async (req, res) => {
@@ -112,7 +116,7 @@ router.get('/:id(\\d+)', wrap(async (req, res) => {
      WHERE p.id = $1`, [id])
   if (!p) return res.status(404).json({ error: '项目不存在' })
   if (p.merged_into) return res.json({ redirect: p.merged_into })
-  const [identifiers, events, metrics, credits, relations, history, notes, ambiguous] = await Promise.all([
+  const [identifiers, events, metrics, credits, relations, history, notes, ambiguous, snapshots] = await Promise.all([
     db.query('SELECT id_type, id_value, source, created_at FROM wr_project_ids WHERE project_id = $1 ORDER BY id_type, created_at', [id]),
     db.query(
       `SELECT id, event_type, title, summary, url, source_name, importance, chains, candidate_name, link_method, link_confidence,
@@ -139,8 +143,24 @@ router.get('/:id(\\d+)', wrap(async (req, res) => {
       `SELECT id, event_type, title, event_at FROM wr_events
        WHERE link_method = 'name_ambiguous' AND project_id IS NULL AND link_evidence->'candidate_projects' @> $1::jsonb`,
       [JSON.stringify([{ id }])]),
+    db.query(
+      `SELECT id, rule_version, stage, stage_reason, created_at,
+              facts->'independence_groups' AS groups, facts->>'qualifies' AS qualifies, facts->>'chain_status' AS chain_status,
+              facts->>'maturity' AS maturity
+       FROM wr_screening_snapshots WHERE project_id = $1 ORDER BY id DESC LIMIT 20`, [id]),
   ])
-  res.json({ project: p, identifiers, events, metrics, credits, relations, history, notes, ambiguous })
+  res.json({ project: p, identifiers, events, metrics, credits, relations, history, notes, ambiguous, snapshots })
+}))
+
+// 人工确认所属链（M2.3）：不花点数，确认后立即重新评估
+router.post('/:id(\\d+)/chains', wrap(async (req, res) => {
+  const chains = Array.isArray(req.body?.chains) ? req.body.chains : []
+  try {
+    const r = await pipeline.confirmChains(Number(req.params.id), chains, req.body?.note ? String(req.body.note).slice(0, 500) : null)
+    res.json(r)
+  } catch (e) {
+    res.status(400).json({ error: e.message })
+  }
 }))
 
 router.post('/:id(\\d+)/stage', wrap(async (req, res) => {

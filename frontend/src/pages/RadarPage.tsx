@@ -47,8 +47,13 @@ interface TgeProject { id: number; name: string; symbol?: string | null; chains?
 interface RunInfo { id: number; trigger: string; status: string; started_at: string; finished_at?: string | null; stats?: Record<string, unknown> | null; error?: string | null }
 interface RadarOverview {
   chain: string | null
-  summary: { new_today: number; new_7d: number; total: number; core: number; open_conflicts: number; surf_credits_today: number }
+  summary: {
+    new_today: number; new_7d: number; total: number; core: number; open_conflicts: number; surf_credits_today: number
+    chain_missing?: number; focus?: number; name_only?: number
+  }
+  funnel?: Record<string, number>
   last_run: RunInfo | null
+  last_backfill?: RunInfo | null
   running: boolean
   schedule: { schedule: string; next_run_at: string | null } | null
   projects: RadarProject[]
@@ -230,6 +235,60 @@ function SummaryRow({ s }: { s: RadarOverview['summary'] }) {
         </div>
       ))}
     </div>
+  )
+}
+
+const POOL_STAGES = ['discovered', 'pending_verify', 'data_incomplete', 'data_conflict', 'screening']
+const OUT_STAGES = ['opportunity_chain', 'listed_watch', 'non_early', 'dormant', 'archived']
+const LATER_STAGES = ['deep_research', 'watch', 'tge_plan', 'tge_exec', 'holding', 'exited', 'review', 'rejected']
+
+function FunnelPanel({ o }: { o: RadarOverview }) {
+  const f = o.funnel ?? {}
+  const pool = POOL_STAGES.reduce((a, k) => a + (f[k] ?? 0), 0)
+  const later = LATER_STAGES.reduce((a, k) => a + (f[k] ?? 0), 0)
+  const ratio = pool ? Math.round(((f.screening ?? 0) / pool) * 100) : null
+  const go = (q: string) => { window.location.hash = `#/projects?${q}` }
+  const cell = (k: string) => (
+    <button key={k} onClick={() => go(`stage=${k}`)} className="text-left rounded-md px-2 py-1 -mx-2 hover:bg-bg-subtle-hover">
+      <div className="text-xs text-fg-subtle">{STAGE_LABEL[k] ?? k}</div>
+      <div className="text-xl font-bold tabular-nums mt-1 leading-none">{fmtNum(f[k] ?? 0)}</div>
+    </button>
+  )
+  return (
+    <Panel title="项目漏斗（初筛口径 m2.3）"
+      desc={`早期池 ${fmtNum(pool)} 个，其中初筛 ${fmtNum(f.screening ?? 0)} 个${ratio != null ? `（${ratio}%，观察区间 15–30%，不作硬性目标）` : ''}${later ? `；已人工推进 ${fmtNum(later)} 个` : ''}。点击数字查看对应项目。`}>
+      <div className="flex flex-col gap-4">
+        <div>
+          <div className="text-[11px] text-fg-muted mb-1.5">早期池</div>
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-x-6 gap-y-3">{POOL_STAGES.map(cell)}</div>
+        </div>
+        <div>
+          <div className="text-[11px] text-fg-muted mb-1.5">移出早期池（数据保留，出现新信号会自动恢复）</div>
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-x-6 gap-y-3">{OUT_STAGES.map(cell)}</div>
+        </div>
+        <div className="flex flex-wrap gap-3 border-t border-border-base pt-3">
+          <button onClick={() => go('gate=chain_missing')}
+            className="rounded-md border border-border-strong px-3 py-2 text-left hover:bg-bg-subtle-hover">
+            <div className="text-xs text-fg-subtle">只差确认链</div>
+            <div className="text-lg font-bold tabular-nums leading-tight">{fmtNum(o.summary.chain_missing ?? 0)}</div>
+            <div className="text-[11px] text-fg-muted">证据已满足初筛，确认链后即进初筛（不花点数）</div>
+          </button>
+          <button onClick={() => go('gate=focus')}
+            className="rounded-md border border-border-base px-3 py-2 text-left hover:bg-bg-subtle-hover">
+            <div className="text-xs text-fg-subtle">待验证重点</div>
+            <div className="text-lg font-bold tabular-nums leading-tight">{fmtNum(o.summary.focus ?? 0)}</div>
+            <div className="text-[11px] text-fg-muted">高质量融资 + 产品证据，缺链信息</div>
+          </button>
+          <div className="rounded-md border border-border-base px-3 py-2">
+            <div className="text-xs text-fg-subtle">仅有名称</div>
+            <div className="text-lg font-bold tabular-nums leading-tight">{fmtNum(o.summary.name_only ?? 0)}</div>
+            <div className="text-[11px] text-fg-muted">
+              {o.last_backfill ? `上次身份补全 ${fmtTime(o.last_backfill.started_at)}` : '可在「数据与点数」页做一次身份补全'}
+            </div>
+          </div>
+        </div>
+      </div>
+    </Panel>
   )
 }
 
@@ -571,6 +630,7 @@ export default function RadarPage() {
       {data && (
         <>
           <SummaryRow s={data.summary} />
+          <FunnelPanel o={data} />
           <ProjectsTable rows={data.projects} />
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
             <FundraisingList rows={data.fundraising} />

@@ -11,7 +11,7 @@ const EVM_CHAINS = new Set(['ethereum', 'bsc', 'base', 'arbitrum', 'robinhood', 
 const STRONG_TYPES = new Set(['surf_id', 'contract'])
 
 // 引用 project_id 的表：合并时统一迁移。后续里程碑新增的表（事件、评分、快照…）需要加到这里。
-const PROJECT_REF_TABLES = ['wr_metrics', 'wr_alerts', 'wr_api_usage', 'wr_events', 'wr_stage_history', 'wr_notes']
+const PROJECT_REF_TABLES = ['wr_metrics', 'wr_alerts', 'wr_api_usage', 'wr_events', 'wr_stage_history', 'wr_notes', 'wr_screening_snapshots']
 // 不需要迁移的表：身份标识单独处理；关系表本身记录合并历史
 const PROJECT_REF_EXEMPT = ['wr_project_ids', 'wr_project_relations']
 
@@ -179,6 +179,12 @@ async function mergeProjects(sourceId, targetId, { reason, confidence = 'high', 
          website_domain = COALESCE(t.website_domain, s.website_domain),
          twitter_handle = COALESCE(t.twitter_handle, s.twitter_handle),
          category = COALESCE(t.category, s.category),
+         tags = COALESCE(t.tags, s.tags),
+         -- 链信息来源取可信度更高的一方（manual > surf_detail > airdrop_task > inferred）
+         chain_source = CASE WHEN array_position(ARRAY['manual','surf_detail','airdrop_task','inferred'], s.chain_source)
+                                < COALESCE(array_position(ARRAY['manual','surf_detail','airdrop_task','inferred'], t.chain_source), 99)
+                             THEN s.chain_source ELSE t.chain_source END,
+         last_signal_at = GREATEST(t.last_signal_at, s.last_signal_at),
          primary_chain = COALESCE(t.primary_chain, s.primary_chain),
          chains = (SELECT COALESCE(jsonb_agg(DISTINCT c), '[]'::jsonb)
                    FROM jsonb_array_elements_text(COALESCE(t.chains,'[]'::jsonb) || COALESCE(s.chains,'[]'::jsonb)) AS c),
@@ -471,7 +477,39 @@ async function identityStatus(projectIds) {
   return out
 }
 
+// ───────── 链信息来源（M2.3）─────────
+// 可信度：manual（人工确认）> surf_detail（Surf 项目详情 / 合约）> airdrop_task（空投任务所在链）> inferred（由标题或简介文字推断）
+const CHAIN_SOURCE_RANK = ['manual', 'surf_detail', 'airdrop_task', 'inferred']
+const CORE_CHAIN_IDS = ['ethereum', 'bsc', 'base', 'arbitrum', 'solana', 'robinhood']
+
+/**
+ * 写入链信息并记录来源：
+ * - 新来源更可信（或当前无链）→ 用新链替换（例如项目详情覆盖文字推断的链）
+ * - 来源同级 → 取并集
+ * - 当前来源更可信 → 不改（manual 时总是替换）
+ */
+async function setChains(projectId, chains, source, q = db.query) {
+  const list = [...new Set((chains || []).map(normalizeChain).filter(Boolean))]
+  if (!list.length || !CHAIN_SOURCE_RANK.includes(source)) return false
+  const cur = (await q('SELECT chains, chain_source FROM wr_projects WHERE id = $1', [projectId]))[0]
+  if (!cur) return false
+  const curChains = cur.chains || []
+  const curRank = cur.chain_source ? CHAIN_SOURCE_RANK.indexOf(cur.chain_source) : 99
+  const newRank = CHAIN_SOURCE_RANK.indexOf(source)
+  let next
+  if (source === 'manual' || !curChains.length || newRank < curRank) next = list
+  else if (newRank === curRank) next = [...new Set([...curChains, ...list])]
+  else return false
+  const primary = next.find((c) => CORE_CHAIN_IDS.includes(c)) || next[0]
+  await q(
+    `UPDATE wr_projects SET chains = $2::jsonb, primary_chain = $3, chain_source = $4, updated_at = now() WHERE id = $1`,
+    [projectId, JSON.stringify(next), primary, source],
+  )
+  return true
+}
+
 module.exports = {
+  setChains, CHAIN_SOURCE_RANK,
   upsertProject, attachIdentity, mergeProjects, decideRelation, resolveMerged, identityStatus,
   normalizeDomain, normalizeTwitter, normalizeContract, normalizeChain, normalizeName, buildIdentifiers,
   PROJECT_REF_TABLES, PROJECT_REF_EXEMPT, MERGE_RULE_VERSION,
