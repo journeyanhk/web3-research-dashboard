@@ -49,7 +49,7 @@ interface RadarOverview {
   chain: string | null
   summary: {
     new_today: number; new_7d: number; total: number; core: number; open_conflicts: number; surf_credits_today: number
-    chain_missing?: number; focus?: number; name_only?: number; listing_unverified?: number; airdrop_chain_only?: number; surf_not_found?: number; archive_soon?: number; archived?: number
+    chain_missing?: number; focus?: number; name_only?: number; listing_unverified?: number; airdrop_chain_only?: number; surf_not_found?: number; archive_soon?: number; archived?: number; leads?: number; leads_archived?: number
   }
   funnel?: Record<string, number>
   last_run: RunInfo | null
@@ -256,7 +256,7 @@ function FunnelPanel({ o }: { o: RadarOverview }) {
   )
   return (
     <Panel title="项目漏斗（初筛口径 m2.3.1）"
-      desc={`早期池 ${fmtNum(pool)} 个，其中初筛 ${fmtNum(f.screening ?? 0)} 个${ratio != null ? `（${ratio}%，观察区间 15–30%，不作硬性目标）` : ''}${later ? `；已人工推进 ${fmtNum(later)} 个` : ''}。点击数字查看对应项目。`}>
+      desc={`正式项目 ${fmtNum((o.summary.total ?? 0) - (o.summary.leads ?? 0))} 个（另含仅名称线索 ${fmtNum(o.summary.leads ?? 0)} 个，不计入初筛）；早期池 ${fmtNum(pool)} 个，其中初筛 ${fmtNum(f.screening ?? 0)} 个${ratio != null ? `（${ratio}%，观察区间 15–30%，不作硬性目标）` : ''}${later ? `；已人工推进 ${fmtNum(later)} 个` : ''}。点击数字查看对应项目。`}>
       <div className="flex flex-col gap-4">
         <div>
           <div className="text-[11px] text-fg-muted mb-1.5">早期池</div>
@@ -284,7 +284,8 @@ function FunnelPanel({ o }: { o: RadarOverview }) {
             <div className="text-lg font-bold tabular-nums leading-tight">{fmtNum(o.summary.name_only ?? 0)}</div>
             <div className="text-[11px] text-fg-muted">
               {o.last_backfill ? `上次身份补全 ${fmtTime(o.last_backfill.started_at)}` : '可在「数据与点数」页做一次身份补全'}
-              {(o.summary.surf_not_found ?? 0) > 0 && <> · 其中 Surf 未收录 {fmtNum(o.summary.surf_not_found ?? 0)} 个（不会再重复付费搜索）</>}
+              {(o.summary.surf_not_found ?? 0) > 0 && <> · Surf 未收录 {fmtNum(o.summary.surf_not_found ?? 0)} 个（不会再重复付费搜索）</>}
+              {(o.summary.leads ?? 0) > 0 && <> · 其中仅名称线索 {fmtNum(o.summary.leads ?? 0)} 个（无第二证据，14 天归档{(o.summary.leads_archived ?? 0) > 0 ? `，已归档 ${fmtNum(o.summary.leads_archived)}` : ''}）</>}
             </div>
           </div>
           <button onClick={() => go('listing=inferred')}

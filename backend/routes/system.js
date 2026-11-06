@@ -97,7 +97,10 @@ router.put('/settings/:key', wrap(async (req, res) => {
   }
   if (key === 'pipeline_config') {
     const d = Number(value.dormant_days); const a = Number(value.archive_days)
+    const lead = Number(value.lead_archive_days); const mi = Number(value.market_inferred_mcap_usd)
     if (!(d >= 1) || !(a > d)) return res.status(400).json({ error: '休眠天数需 ≥ 1，归档天数需大于休眠天数' })
+    if (!(lead >= 1) || lead > d) return res.status(400).json({ error: '线索归档天数需 ≥ 1，且不大于休眠天数' })
+    if (!(mi > 0)) return res.status(400).json({ error: '市场推断上市阈值需大于 0' })
   }
   await registry.set('setting', key, value)
   res.json({ ok: true })

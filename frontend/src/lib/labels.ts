@@ -37,6 +37,7 @@ export const CHAIN_SOURCE_LABEL: Record<string, string> = {
 }
 export const LISTING_LABEL: Record<string, { text: string; cls: string; tip: string }> = {
   confirmed: { text: '已确认上市', cls: 'text-fg-base', tip: '已完成 TGE，或有已确认关联的交易所上币事件' },
+  market_inferred: { text: '市场推断已上市', cls: 'text-[var(--color-tag-yellow-100)]', tip: '有代币符号且流通市值达到阈值，但未确认 TGE / 上币；移出早期池，进入已上市观察' },
   inferred: { text: '可能已上市（待核实）', cls: 'text-[var(--color-tag-orange-100)]', tip: '只有市值 / FDV 数据，没有 TGE 或上币确认，暂留早期池' },
   none: { text: '无上市证据', cls: 'text-fg-muted', tip: '没有任何上市迹象' },
 }

@@ -426,16 +426,40 @@ async function boundaryTests(results) {
       assert(r2.chain_source === 'contract_chain' && r2.chains.includes('base'), '合约所在链没有覆盖空投任务链')
       return `链状态 ${r.chain_status}，空投活动链 ${JSON.stringify(r.campaign_chains)}；之后合约链（base）优先覆盖`
     })
-    await step(results, '漏斗', '休眠 / 归档阈值：14 天休眠，30 天归档，初筛不自动休眠', async () => {
+    await step(results, '漏斗', '休眠 / 归档阈值：有实体信息 21 天休眠、45 天归档，初筛不自动休眠', async () => {
       const ago = (d) => new Date(Date.now() - d * 86400000).toISOString()
-      const a = pipeline.decideStage(base({ lastSignalAt: ago(13) }))
-      const b = pipeline.decideStage(base({ lastSignalAt: ago(15) }))
-      const c = pipeline.decideStage(base({ lastSignalAt: ago(31) }))
+      const a = pipeline.decideStage(base({ lastSignalAt: ago(20) }))
+      const b = pipeline.decideStage(base({ lastSignalAt: ago(22) }))
+      const c = pipeline.decideStage(base({ lastSignalAt: ago(46) }))
       const d = pipeline.decideStage(base({ ...ok2(), lastSignalAt: ago(60) }))
       assert(a.stage === 'discovered' && b.stage === 'dormant' && c.stage === 'archived' && d.stage === 'screening',
         `结果：${a.stage} / ${b.stage} / ${c.stage} / ${d.stage}`)
-      assert(b.facts.would_be_stage === 'discovered', '休眠时没有记录原阶段')
-      return '13 天 → 发现；15 天 → 休眠；31 天 → 归档；初筛 60 天仍为初筛'
+      assert(b.facts.would_be_stage === 'discovered' && b.facts.idle_days === 22, '休眠时没有记录原阶段或天数')
+      assert(pipeline.DEFAULT_PIPELINE_CONFIG.dormant_days === 21 && pipeline.DEFAULT_PIPELINE_CONFIG.archive_days === 45, '默认天数不是 21 / 45')
+      return '20 天 → 发现；22 天 → 休眠；46 天 → 归档；初筛 60 天仍为初筛'
+    })
+    await step(results, '漏斗', '仅名称线索：无第二证据 14 天直接归档（只归档不删除），有融资则按正式项目处理', async () => {
+      const ago = (d) => new Date(Date.now() - d * 86400000).toISOString()
+      const a = pipeline.decideStage(base({ identity: 'name_only', lead: true, lastSignalAt: ago(13) }))
+      const b = pipeline.decideStage(base({ identity: 'name_only', lead: true, lastSignalAt: ago(15) }))
+      const c = pipeline.decideStage(base({ identity: 'name_only', lead: false, lastSignalAt: ago(15) }))
+      assert(a.stage === 'data_incomplete' && a.facts.lead === true, `13 天线索引线应为数据待补全：${a.stage}`)
+      assert(b.stage === 'archived' && /线索/.test(b.reason), `15 天线索引线应归档：${b.stage}`)
+      assert(c.stage !== 'archived', `有第二证据的仅名称项目不应按线索归档：${c.stage}`)
+      assert(pipeline.DEFAULT_PIPELINE_CONFIG.lead_archive_days === 14, '线索归档天数不是 14')
+      return `线索 13 天 → ${a.stage}；15 天 → 归档；有融资的仅名称项目 → ${c.stage}`
+    })
+    await step(results, '漏斗', '上市证据三级：市场推断已上市（市值 ≥ 5000 万 + 代币符号）移出早期池，但仍不是确认上市', async () => {
+      const ago = (d) => new Date(Date.now() - d * 86400000).toISOString()
+      const a = pipeline.decideStage(base({ ...ok2(), symbol: 'META', project: { name: 'X', tge_status: null }, metrics: { market_cap_usd: 60e6, fdv_usd: 60e6 }, lastSignalAt: ago(1) }))
+      const b = pipeline.decideStage(base({ ...ok2(), symbol: 'SMALL', project: { name: 'Y', tge_status: null }, metrics: { market_cap_usd: 20e6 } }))
+      const c = pipeline.decideStage(base({ ...ok2(), symbol: null, project: { name: 'Z', tge_status: null }, metrics: { market_cap_usd: 80e6 } }))
+      assert(a.stage === 'listed_watch' && a.facts.listing_evidence_level === 'market_inferred' && a.facts.maturity === 'listed',
+        `市值 6000 万 + 符号：${a.stage} / ${a.facts.listing_evidence_level}`)
+      assert(b.stage === 'screening' && b.facts.listing_evidence_level === 'inferred', `市值 2000 万：${b.stage} / ${b.facts.listing_evidence_level}`)
+      assert(c.stage !== 'listed_watch' && c.facts.listing_evidence_level === 'inferred', `无代币符号：${c.stage} / ${c.facts.listing_evidence_level}`)
+      assert(pipeline.listingLevelOf({ tgeStatus: 'post' }) === 'confirmed', 'TGE 已完成应为确认上市')
+      return `6000 万 + 符号 → 市场推断已上市（${a.stage}）；2000 万 → ${b.stage}；无符号 → ${c.stage}`
     })
     await step(results, '漏斗', '身份只有名称 → 数据待补全；有冲突 → 数据冲突', async () => {
       const a = pipeline.decideStage(base({ ...ok2(), identity: 'name_only' }))
@@ -444,12 +468,12 @@ async function boundaryTests(results) {
       return '条件都满足时，仅名称 → 数据待补全，有冲突 → 数据冲突'
     })
     await step(results, '漏斗', '快照只在结果变化时追加；新信号自动从归档恢复', async () => {
-      await db.query(`UPDATE wr_projects SET first_seen_at = now() - interval '40 days', last_signal_at = now() - interval '40 days' WHERE id = $1`, [p2])
+      await db.query(`UPDATE wr_projects SET first_seen_at = now() - interval '46 days', last_signal_at = now() - interval '46 days' WHERE id = $1`, [p2])
       await pipeline.evaluateProjects([p2])
       await pipeline.evaluateProjects([p2])
       const r1 = await db.one('SELECT stage FROM wr_projects WHERE id = $1', [p2])
       const s1 = await db.one('SELECT count(*)::int c FROM wr_screening_snapshots WHERE project_id = $1', [p2])
-      assert(r1.stage === 'archived', `40 天无信号应归档，实际 ${r1.stage}`)
+      assert(r1.stage === 'archived', `46 天无信号应归档，实际 ${r1.stage}`)
       assert(s1.c === 1, `连续评估两次应只有 1 条快照，实际 ${s1.c}`)
       const ev = await D.insertEvent({ type: 'fundraising', externalId: `${tag}-react`, title: 'selftest' })
       await D.linkEvent(ev, { projectId: p2, method: 'name', confidence: 'low' })
@@ -463,7 +487,7 @@ async function boundaryTests(results) {
       assert(!['dormant', 'archived'].includes(r2.stage) && !f2.w, `恢复后仍是 ${r2.stage}，原阶段记录 ${f2.w}`)
       const st = await db.one('SELECT snapshot_type, data_as_of FROM wr_screening_snapshots WHERE project_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1', [p2])
       assert(st.snapshot_type === 'historical_runtime' && st.data_as_of, `快照类型 ${st.snapshot_type}，数据截至 ${st.data_as_of}`)
-      return `归档（31+ 天）→ 新融资事件 → 恢复为自动阶段「${r2.stage}」（已标记重新激活），快照 1 → 2 条，类型「当时运行」`
+      return `归档（46 天）→ 新融资事件 → 恢复为自动阶段「${r2.stage}」（已标记重新激活），快照 1 → 2 条，类型「当时运行」`
     })
     await step(results, '漏斗', '人工确认链：来源记为人工、留痕备注和阶段历史、立即重新评估', async () => {
       await pipeline.confirmChains(p2, ['base'], '自检')

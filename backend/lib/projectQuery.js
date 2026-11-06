@@ -17,7 +17,7 @@ function buildWhere(query, { includeStage }) {
     params.push(value)
     where.push(builder(`$${params.length}`))
   }
-  const { chain, source, identity, signal, q, chain_priority: chainPriority, stage, maturity, chain_status: chainStatus, gate, listing, flag } = query
+  const { chain, source, identity, signal, q, chain_priority: chainPriority, stage, maturity, chain_status: chainStatus, gate, listing, flag, lead } = query
   if (chain) addParam((p) => `p.chains ? ${p}`, String(chain))
   if (chainPriority) addParam((p) => `p.chain_priority = ${p}`, String(chainPriority))
   if (source) addParam((p) => `p.source_types ? ${p}`, String(source))
@@ -27,6 +27,8 @@ function buildWhere(query, { includeStage }) {
   if (chainStatus) addParam((p) => `p.chain_status = ${p}`, String(chainStatus))
   if (listing) addParam((p) => `COALESCE(p.listing_evidence_level, 'none') = ${p}`, String(listing))
   if (flag) addParam((p) => `p.flags ? ${p}`, String(flag))
+  if (lead === 'yes') where.push(`(p.screening_facts->>'lead') = 'true'`)
+  if (lead === 'no') where.push(`COALESCE(p.screening_facts->>'lead', 'false') <> 'true'`)
   // M2.3 快捷入口：只差确认链 / 待验证重点
   if (gate === 'chain_missing') where.push(CHAIN_MISSING_SQL)
   if (gate === 'focus') where.push(`(p.screening_facts->>'focus') = 'true'`)

@@ -5,6 +5,7 @@
 // M2 不做评分；进入深度尽调等后续阶段目前只能人工设定（M3 评分后再加自动升级）。
 const db = require('./db')
 const { identityStatus } = require('./identity')
+const { raiseAlert } = require('./alerts')
 
 const STAGES = [
   { id: 'discovered', label: '发现', auto: true },
@@ -51,8 +52,10 @@ const SIGNAL_GROUP = { fundraising: '融资', public_sale: '融资', airdrop: '�
 
 // M2.3 默认参数（可在 settings.pipeline_config 中覆盖）
 const DEFAULT_PIPELINE_CONFIG = {
-  dormant_days: 14, // 无新有效信号 N 天 → 休眠
-  archive_days: 30, // 无新有效信号 N 天 → 归档
+  dormant_days: 21, // 有实体信息的项目：无新有效信号 N 天 → 休眠
+  archive_days: 45, // 有实体信息的项目：无新有效信号 N 天 → 归档
+  lead_archive_days: 14, // 仅名称线索（Surf 未收录、无第二证据）：N 天 → 归档（只归档不删除，可恢复）
+  market_inferred_mcap_usd: 50e6, // 有代币符号且流通市值 ≥ 5000 万美元 → 市场推断已上市（不是确认上市）
   mature_market_cap_usd: 300e6, // 已上市且流通市值 ≥ 3 亿美元 → 成熟项目
   mature_fdv_usd: 1e9, // 已上市且 FDV ≥ 10 亿美元 → 成熟项目
 }
@@ -104,7 +107,13 @@ const CHAIN_SOURCE_LABEL = {
 const CONFIRMED_CHAIN_SOURCES = ['manual', 'surf_detail', 'contract_chain']
 // 上市证据：confirmed = TGE 状态为已 TGE，或有已确认关联的交易所上币事件（M4 起再加 DEX 交易池 / 有效流动性）；
 // inferred = 只有市值 / FDV 数据（可能是估值、残留或低流动性价格），不据此移出早期池
-const LISTING_EVIDENCE_LABEL = { confirmed: '已确认上市', inferred: '市场数据显示可能已上市（待核实）', none: '无上市证据' }
+const LISTING_EVIDENCE_LABEL = {
+  confirmed: '已确认上市',
+  market_inferred: '市场数据推断已上市（未确认 TGE / 上币）',
+  inferred: '市场数据显示可能已上市（待核实）',
+  none: '无上市证据',
+}
+const LISTING_LEVELS = ['confirmed', 'market_inferred', 'inferred', 'none']
 
 const COMPLETENESS_ITEMS = [
   ['website', '官网'], ['twitter', 'X 账号'], ['surf_id', 'Surf 记录'], ['contract', '合约地址'],
@@ -140,9 +149,13 @@ function chainStatusOf(chains, chainSource) {
 }
 
 /** 成熟度：成熟 > 公链本身 > 已上市 > TGE 前 > 早期 > 未知 */
-function listingLevelOf({ tgeStatus, metrics = {}, confirmedListing = false }) {
+function listingLevelOf({ tgeStatus, metrics = {}, confirmedListing = false, symbol = null }, cfg = DEFAULT_PIPELINE_CONFIG) {
   if (tgeStatus === 'post' || confirmedListing) return 'confirmed'
-  if (Number(metrics.market_cap_usd || 0) > 0 || Number(metrics.fdv_usd || 0) > 0) return 'inferred'
+  const mcap = Number(metrics.market_cap_usd || 0)
+  const fdv = Number(metrics.fdv_usd || 0)
+  // 有代币符号 + 市值达到阈值：市场数据推断已上市，移出早期池，但不写成「确认上市」
+  if (symbol && mcap >= cfg.market_inferred_mcap_usd && mcap > 0) return 'market_inferred'
+  if (mcap > 0 || fdv > 0) return 'inferred'
   return 'none'
 }
 
@@ -150,7 +163,7 @@ function maturityOf({ name, tags, tgeStatus, metrics, identity, listingLevel }, 
   const mcap = Number(metrics.market_cap_usd || 0)
   const fdv = Number(metrics.fdv_usd || 0)
   // 只有已确认的上市证据才算已上市；仅有市值数据保持原成熟度，并在事实里标记待核实
-  const listed = (listingLevel || listingLevelOf({ tgeStatus, metrics })) === 'confirmed'
+  const listed = ['confirmed', 'market_inferred'].includes(listingLevel || listingLevelOf({ tgeStatus, metrics }))
   const knownChain = KNOWN_CHAIN_NAMES.has(normName(name))
   const infra = knownChain || (tags || []).some((t) => CHAIN_INFRA_TAGS.has(t))
   if (listed && (mcap >= cfg.mature_market_cap_usd || fdv >= cfg.mature_fdv_usd)) return { status: 'mature', knownChain }
@@ -164,7 +177,7 @@ function maturityOf({ name, tags, tgeStatus, metrics, identity, listingLevel }, 
 /** 收集单个项目的评估事实 */
 async function gatherFacts(ids) {
   const projects = await db.query(
-    `SELECT id, name, chains, chain_source, tags, flags, tge_status, surf_project_id, website_domain, twitter_handle,
+    `SELECT id, name, symbol, chains, chain_source, tags, flags, tge_status, surf_project_id, website_domain, twitter_handle,
             stage, stage_source, merged_into, first_seen_at, last_signal_at, campaign_chains, detail_fetched_at
      FROM wr_projects WHERE id = ANY($1)`, [ids])
   const events = await db.query(
@@ -295,11 +308,14 @@ async function gatherFacts(ids) {
     // 高质量融资：有计入的 Surf 融资事件（不是空投记录里的融资字段）
     // 上市证据分级：TGE 已完成，或有已确认关联的交易所上币事件
     const confirmedListing = evs.some((e) => e.event_type === 'listing' && ['high', 'medium'].includes(e.link_confidence))
-    const listingLevel = listingLevelOf({ tgeStatus: p.tge_status, metrics, confirmedListing })
+    const listingLevel = listingLevelOf({ tgeStatus: p.tge_status, metrics, confirmedListing, symbol: p.symbol })
     // 本次评估所用数据的截止时间：最近的事件 / 详情 / 指标
     const times = [...evs.map((e) => e.created_at), p.detail_fetched_at, ...metricList.map((m) => m.fetched_at)]
       .filter(Boolean).map((t) => new Date(t).getTime())
     const dataAsOf = times.length ? new Date(Math.max(...times)).toISOString() : null
+    // 第二证据：融资 / 公募 / TGE / 上币（中高置信关联）。有它才从「线索」升级为正式项目
+    const secondEvidence = evs.some((e) => ['fundraising', 'public_sale', 'tge', 'listing'].includes(e.event_type)
+      && ['high', 'medium'].includes(e.link_confidence || 'medium'))
     const qualityFunding = evidence.some((x) => x.counted && x.condition === 'credible_funding' && x.independence_group === 'surf_fundraising')
     const groups = evs.map((e) => SIGNAL_GROUP[e.event_type]).filter(Boolean)
     return {
@@ -307,7 +323,9 @@ async function gatherFacts(ids) {
       identity: ident,
       hard, bonus, completeness, metrics,
       chainStatus, chainSource: p.chain_source || null, chains, campaignChains: p.campaign_chains || [],
-      listingLevel, dataAsOf,
+      listingLevel, dataAsOf, symbol: p.symbol || null,
+      // 线索：只有名称（Surf 未确认身份），且没有任何第二证据（融资 / 公募 / TGE / 上币）
+      lead: ident === 'name_only' && !secondEvidence,
       flags: p.flags || [],
       lastSignalAt: p.last_signal_at || p.first_seen_at,
       sourceTypes: [...new Set(evs.map((e) => e.event_type))].sort(),
@@ -347,7 +365,7 @@ function decideStage(f, cfg = DEFAULT_PIPELINE_CONFIG) {
   const bonusMet = Object.entries(f.bonus).filter(([, v]) => v).map(([k]) => k)
   const missing = COMPLETENESS_ITEMS.filter(([k]) => !f.completeness[k]).map(([, l]) => l)
   const groups = independentGroups(f, hardMet, bonusMet)
-  const listingLevel = f.listingLevel || listingLevelOf({ tgeStatus: f.project.tge_status, metrics: f.metrics || {} })
+  const listingLevel = f.listingLevel || listingLevelOf({ tgeStatus: f.project.tge_status, metrics: f.metrics || {}, symbol: f.symbol }, cfg)
   const maturity = maturityOf({ name: f.project.name, tags: f.tags, tgeStatus: f.project.tge_status, metrics: f.metrics || {}, identity: f.identity, listingLevel }, cfg)
   const qualifies = hardMet.length >= 1 && bonusMet.length >= 1 && groups.length >= 2
   const chainText = (f.chains || []).join(', ') || '—'
@@ -366,7 +384,9 @@ function decideStage(f, cfg = DEFAULT_PIPELINE_CONFIG) {
     reason = '项目本身就是一条公链 / L2，不是链上的早期项目，移出早期池'
   } else if (maturity.status === 'listed') {
     stage = 'listed_watch'
-    reason = '已有代币市场（已 TGE），移出早期池，进入已上市观察'
+    reason = listingLevel === 'market_inferred'
+      ? '有代币符号且流通市值 ≥ 5000 万美元，市场数据推断已上市（未确认 TGE / 上币），移出早期池，进入已上市观察'
+      : '已有代币市场（已 TGE），移出早期池，进入已上市观察'
   } else if (maturity.status === 'chain_infrastructure') {
     stage = 'opportunity_chain'
     reason = '项目是新的公链 / L2 本身，不属于 6 条核心链上的项目，放入机会链观察'
@@ -411,7 +431,11 @@ function decideStage(f, cfg = DEFAULT_PIPELINE_CONFIG) {
   // 休眠 / 归档：只针对低信息阶段；初筛等待人工判断，已移出早期池的不处理
   const idle = daysSince(f.lastSignalAt)
   const wouldBe = stage
-  if (DORMANCY_STAGES.has(stage) && idle != null) {
+  const lead = !!f.lead
+  if (lead && idle != null && idle >= cfg.lead_archive_days) {
+    stage = 'archived'
+    reason = `线索：只有名称且 Surf 未收录，${idle} 天没有新的有效信号，归档（只归档不删除；出现融资、上币、详情等新信号或 Surf 收录后自动恢复）`
+  } else if (DORMANCY_STAGES.has(stage) && idle != null) {
     if (idle >= cfg.archive_days) {
       stage = 'archived'
       reason = `${idle} 天没有新的有效信号（最近：${fmtDate(f.lastSignalAt)}），暂时归档；出现融资、TGE、上币、空投或详情等新信号时自动恢复。原阶段：${STAGE_LABEL_MAP[wouldBe]}`
@@ -440,10 +464,13 @@ function decideStage(f, cfg = DEFAULT_PIPELINE_CONFIG) {
       chains: f.chains || [],
       campaign_chains: f.campaignChains || [],
       listing_evidence_level: listingLevel,
-      market_data_suggests_listed: listingLevel === 'inferred',
+      listing_reason: listingLevel === 'market_inferred' ? `market_cap_threshold` : listingLevel === 'inferred' ? 'market_data_only' : null,
+      market_data_suggests_listed: ['inferred', 'market_inferred'].includes(listingLevel),
+      lead,
       data_as_of: f.dataAsOf || null,
       focus,
       would_be_stage: wouldBe !== stage ? wouldBe : null,
+      idle_days: idle,
       last_signal_at: f.lastSignalAt ? new Date(f.lastSignalAt).toISOString() : null,
       product_evidence_level: f.productLevel || null,
       rule_version: RULE_VERSION,
@@ -487,6 +514,7 @@ async function evaluateProjects(ids = null, { snapshotType = 'historical_runtime
       const autoManaged = p.stage_source !== 'manual' && (AUTO_STAGES.has(p.stage) || !STAGE_IDS.has(p.stage))
       let finalStage = p.stage
       let finalReason = d.reason
+      const notifications = []
       if (autoManaged && d.stage !== p.stage) {
         // 从休眠 / 归档恢复：记为重新激活
         const reactivated = ['dormant', 'archived'].includes(p.stage) && !['dormant', 'archived'].includes(d.stage)
@@ -495,8 +523,15 @@ async function evaluateProjects(ids = null, { snapshotType = 'historical_runtime
         if (reactivated) await db.query('UPDATE wr_projects SET reactivated_at = now() WHERE id = $1', [p.id])
         changed.push({ id: p.id, name: p.name, from: p.stage, to: d.stage, reactivated })
         finalStage = d.stage
+        if (d.stage === 'screening') notifications.push({ type: 'entered_screening', severity: 'info', title: `${p.name} 进入初筛`, detail: { from: p.stage, reason: d.reason } })
+        if (d.stage === 'archived' && !d.facts.lead) notifications.push({ type: 'archived', severity: 'info', title: `${p.name} 已归档：${d.reason}`, detail: { from: p.stage, idle_days: d.facts.idle_days } })
+        if (reactivated) notifications.push({ type: 'reactivated', severity: 'info', title: `${p.name} 出现新信号，重新激活`, detail: { from: p.stage, to: d.stage } })
       } else if (autoManaged) {
         await db.query('UPDATE wr_projects SET stage_reason = $2 WHERE id = $1', [p.id, d.reason])
+        // 休眠中且 7 天内将被归档：提前提醒一次
+        if (d.stage === 'dormant' && !d.facts.lead && d.facts.idle_days != null && d.facts.idle_days >= cfg.archive_days - 7) {
+          notifications.push({ type: 'archive_due', severity: 'info', title: `${p.name} 将在 ${Math.max(cfg.archive_days - d.facts.idle_days, 0)} 天内归档`, detail: { idle_days: d.facts.idle_days, archive_days: cfg.archive_days } })
+        }
       } else {
         finalReason = null
       }
@@ -508,6 +543,14 @@ async function evaluateProjects(ids = null, { snapshotType = 'historical_runtime
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
           [p.id, SCREENING_RULE_VERSION, finalStage, finalReason, JSON.stringify(d.facts), hash, snapshotType, d.facts.data_as_of])
         snapshots++
+      }
+      for (const n of notifications) {
+        try {
+          await raiseAlert({
+            category: 'signal', type: n.type, severity: n.severity, projectId: p.id, title: n.title,
+            detail: { ...n.detail, stage: finalStage }, dedupeKey: `${n.type}:${p.id}:${new Date().toISOString().slice(0, 10)}`,
+          })
+        } catch (e) { /* 告警失败不影响评估 */ }
       }
     }
   }

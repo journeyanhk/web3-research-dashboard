@@ -377,7 +377,7 @@ async function relinkNews(ctx) {
 async function identityCandidates(limit, cooldownDays) {
   return db.query(
     `SELECT id, name FROM wr_projects
-     WHERE merged_into IS NULL AND surf_project_id IS NULL AND COALESCE(identity_status, 'name_only') = 'name_only'
+     WHERE merged_into IS NULL AND stage <> 'archived' AND surf_project_id IS NULL AND COALESCE(identity_status, 'name_only') = 'name_only'
        AND (surf_searched_at IS NULL
             OR (last_signal_at > surf_searched_at AND surf_searched_at < now() - ($2 || ' days')::interval))
      ORDER BY last_signal_at DESC NULLS LAST, id DESC LIMIT $1`,
@@ -633,6 +633,11 @@ async function runJob({ job, trigger, steps, cfgOverride = {} }) {
     }
   }
   try { await refreshChainPriority() } catch (e) { ctx.errors.push(`链优先级：${e.message}`) }
+  // 事件型站内提醒（TGE / 上币 / 新融资），去重后写入
+  try {
+    const al = await require('../notify').scanEventAlerts({ sinceHours: 26 })
+    ctx.stats.alerts = al
+  } catch (e) { ctx.errors.push(`提醒：${e.message}`) }
   // 采集后重新评估项目阶段（只读数据库，不花点数）
   try {
     const ev = await require('../pipeline').evaluateProjects()

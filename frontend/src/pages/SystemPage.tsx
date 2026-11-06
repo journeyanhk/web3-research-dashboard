@@ -271,7 +271,10 @@ function ProvidersTable({ providers }: { providers: Provider[] }) {
   )
 }
 
-interface PipelineConfig { dormant_days: number; archive_days: number; mature_market_cap_usd: number; mature_fdv_usd: number }
+interface PipelineConfig {
+  dormant_days: number; archive_days: number; lead_archive_days?: number; market_inferred_mcap_usd?: number
+  mature_market_cap_usd: number; mature_fdv_usd: number
+}
 interface BackfillResult {
   skipped?: boolean; reason?: string; dryRun?: boolean; candidates?: number; estimated_credits_max?: number
   status?: string; stats?: { surf_credits?: number; identity_backfill?: Record<string, number>; detail?: Record<string, number> }
@@ -325,20 +328,28 @@ function PipelineSettings({ setting }: { setting: PipelineConfig }) {
   const qc = useQueryClient()
   const [dormant, setDormant] = useState(String(setting.dormant_days))
   const [archive, setArchive] = useState(String(setting.archive_days))
+  const [lead, setLead] = useState(String(setting.lead_archive_days ?? 14))
+  const [inferred, setInferred] = useState(String((setting.market_inferred_mcap_usd ?? 50e6) / 1e6))
   const [mcap, setMcap] = useState(String(setting.mature_market_cap_usd / 1e6))
   const [fdv, setFdv] = useState(String(setting.mature_fdv_usd / 1e6))
   const save = useMutation({
     mutationFn: () => sendJson('system/settings/pipeline_config', 'PUT', {
-      value: { dormant_days: Number(dormant), archive_days: Number(archive), mature_market_cap_usd: Number(mcap) * 1e6, mature_fdv_usd: Number(fdv) * 1e6 },
+      value: {
+        dormant_days: Number(dormant), archive_days: Number(archive), lead_archive_days: Number(lead),
+        market_inferred_mcap_usd: Number(inferred) * 1e6,
+        mature_market_cap_usd: Number(mcap) * 1e6, mature_fdv_usd: Number(fdv) * 1e6,
+      },
     }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['system-overview'] }),
   })
   const input = 'w-full rounded-md border border-border-base bg-transparent px-2.5 py-1.5 text-sm tabular-nums focus:outline-none focus:border-border-focus'
   return (
-    <Section title="早期池规则" desc="保存后在下次评估（每日采集后，或项目池「重新评估」）生效。成熟项目 = 已上市且市值或 FDV 超过阈值。">
+    <Section title="早期池规则" desc="保存后在下次评估（每日采集后，或项目池「重新评估」）生效。成熟项目 = 已上市且市值或 FDV 超过阈值。仅名称线索（Surf 未收录、无第二证据）到期只归档不删除。">
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <label className="flex flex-col gap-1.5 text-xs text-fg-subtle">无新信号多少天休眠<input className={input} value={dormant} onChange={(e) => setDormant(e.target.value)} inputMode="numeric" /></label>
         <label className="flex flex-col gap-1.5 text-xs text-fg-subtle">无新信号多少天归档<input className={input} value={archive} onChange={(e) => setArchive(e.target.value)} inputMode="numeric" /></label>
+        <label className="flex flex-col gap-1.5 text-xs text-fg-subtle">仅名称线索多少天归档<input className={input} value={lead} onChange={(e) => setLead(e.target.value)} inputMode="numeric" /></label>
+        <label className="flex flex-col gap-1.5 text-xs text-fg-subtle">市场推断上市阈值（百万美元）<input className={input} value={inferred} onChange={(e) => setInferred(e.target.value)} inputMode="numeric" /></label>
         <label className="flex flex-col gap-1.5 text-xs text-fg-subtle">成熟市值阈值（百万美元）<input className={input} value={mcap} onChange={(e) => setMcap(e.target.value)} inputMode="numeric" /></label>
         <label className="flex flex-col gap-1.5 text-xs text-fg-subtle">成熟 FDV 阈值（百万美元）<input className={input} value={fdv} onChange={(e) => setFdv(e.target.value)} inputMode="numeric" /></label>
       </div>

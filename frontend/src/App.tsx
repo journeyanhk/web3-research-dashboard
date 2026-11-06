@@ -4,6 +4,7 @@ import RadarPage from './pages/RadarPage'
 import ProjectsPage from './pages/ProjectsPage'
 import ProjectDetailPage from './pages/ProjectDetailPage'
 import LoginPage from './pages/LoginPage'
+import AlertsPage from './pages/AlertsPage'
 import { getToken, clearToken, AUTH_EVENT } from './lib/auth'
 import { getJson } from './lib/fetcher'
 
@@ -12,9 +13,9 @@ type PageKey = 'radar' | 'projects' | 'tge' | 'workbench' | 'alerts' | 'system'
 const NAV: { key: PageKey; label: string; milestone?: string }[] = [
   { key: 'radar', label: '项目雷达' },
   { key: 'projects', label: '项目池' },
+  { key: 'alerts', label: '提醒中心' },
   { key: 'tge', label: 'TGE / 解锁', milestone: 'M4' },
   { key: 'workbench', label: '研究工作台', milestone: 'M5' },
-  { key: 'alerts', label: '告警中心', milestone: 'M6' },
   { key: 'system', label: '数据与点数' },
 ]
 
@@ -96,6 +97,8 @@ export default function App() {
           <SystemPage />
         ) : page === 'radar' ? (
           <RadarPage />
+        ) : page === 'alerts' ? (
+          <AlertsPage />
         ) : page === 'projects' ? (
           route.projectId ? <ProjectDetailPage id={route.projectId} key={route.projectId} /> : <ProjectsPage />
         ) : (
