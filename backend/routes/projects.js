@@ -162,6 +162,7 @@ router.get('/:id(\\d+)', wrap(async (req, res) => {
     db.query(
       `SELECT id, score_version, scoring_rule_version, quality_score::float AS quality_score, tge_score::float AS tge_score,
               action_score::float AS action_score, grade, confidence::float AS confidence, coverage::float AS coverage,
+              data_coverage::float AS data_coverage, chain_factor::float AS chain_factor,
               freshness_days, recommendation, dims, tge_dims, flags, reasons, snapshot_type, data_as_of, created_at
        FROM wr_scores WHERE project_id = $1 ORDER BY created_at DESC, id DESC LIMIT 20`, [id]),
   ])

@@ -88,6 +88,8 @@ interface ScoreRow {
   grade: string
   confidence: number | null
   coverage: number | null
+  data_coverage?: number | null
+  chain_factor?: number | null
   freshness_days: number | null
   recommendation: string
   dims?: Record<string, number> | null
@@ -198,7 +200,8 @@ function ScoreCard({ projectId, score, scores }: { projectId: number; score?: Sc
 
           <div className="flex flex-wrap gap-x-4 gap-y-1 mt-3 text-[11px] text-fg-muted">
             <span>置信度 {pct(score.confidence)}</span>
-            <span>数据覆盖 {pct(score.coverage)}</span>
+            <span title="六个评分维度中有证据的比例">数据覆盖 {pct(score.data_coverage ?? score.coverage)}</span>
+            <span title="链的数据折扣，只作用于行动分">链系数 {score.chain_factor == null ? '—' : score.chain_factor.toFixed(2)}</span>
             <span>数据时效 {score.freshness_days == null ? '—' : `${score.freshness_days} 天前`}</span>
             <span>口径 {score.score_version} · {score.scoring_rule_version}</span>
           </div>

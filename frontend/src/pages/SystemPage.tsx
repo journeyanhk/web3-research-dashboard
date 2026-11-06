@@ -40,7 +40,8 @@ interface SelftestResult { group: string; name: string; ok: boolean | null; deta
 interface Selftest { ran_at: string; passed: number; failed: number; results: SelftestResult[] }
 interface SurfBudgetSetting { monthly: number; auto_ratio: number; stage_total_caps: Record<string, number> }
 interface ScoreConfig {
-  version: string; locked: boolean
+  version: string; revision?: number; locked: boolean; locked_at?: string | null
+  unlock_log?: { at: string; reason: string }[]
   quality_weights: Record<string, number>; tge_weights: Record<string, number>
   chain_factor: Record<string, number>
   market_inferred_factor: number; lead_factor: number; stale_days: number
@@ -399,6 +400,11 @@ function ScoreSettings({ setting, overview }: { setting: ScoreConfig; overview?:
   const [sol, setSol] = useState(String(Math.round((setting.chain_factor.solana ?? 0.9) * 100)))
   const [rh, setRh] = useState(String(Math.round((setting.chain_factor.robinhood ?? 0.8) * 100)))
   const [stale, setStale] = useState(String(setting.stale_days))
+  const locked = !!setting.locked
+  const unlock = useMutation({
+    mutationFn: (reason: string) => sendJson('system/score-config/unlock', 'POST', { reason }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['system-overview'] }),
+  })
   const qSum = Object.values(q).reduce((a, b) => a + Number(b || 0), 0)
   const tSum = Object.values(t).reduce((a, b) => a + Number(b || 0), 0)
   const save = useMutation({
@@ -419,10 +425,12 @@ function ScoreSettings({ setting, overview }: { setting: ScoreConfig; overview?:
     }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['system-overview'] }),
   })
-  const input = 'w-full rounded-md border border-border-base bg-transparent px-2.5 py-1.5 text-sm tabular-nums focus:outline-none focus:border-border-focus'
+  const input = `w-full rounded-md border border-border-base bg-transparent px-2.5 py-1.5 text-sm tabular-nums focus:outline-none focus:border-border-focus${locked ? ' opacity-60 cursor-not-allowed' : ''}`
   return (
-    <Section title="M3 评分口径（草案）"
-      desc="质量分与 TGE 分分开计算；维度权重、置信度门槛、链覆盖折扣都可调。阈值留空表示「口径未锁定」，系统只打分、不下「建议深研 / 关注」的结论。建议先观察 1–2 天真实数据再填阈值。">
+    <Section title={locked ? 'M3 评分口径（已锁定）' : 'M3 评分口径（草案）'}
+      desc={locked
+        ? `口径已于 ${setting.locked_at ? fmtTime(setting.locked_at) : '—'} 锁定（版本 ${setting.version}${(setting.revision ?? 1) > 1 ? `.r${setting.revision}` : ''}）。锁定后不能直接改权重 / 阈值 / 折扣，需先解锁并填写原因；解锁会让评分版本 +1，并生成新版本快照。`
+        : '质量分与 TGE 分分开计算；维度权重、置信度门槛、链覆盖折扣都可调。阈值留空表示「口径未锁定」，系统只打分、不下「建议深研 / 关注」的结论。建议先观察 1–2 天真实数据再填阈值。'}>
       {overview && (
         <div className="flex flex-wrap gap-x-5 gap-y-1 text-sm mb-4">
           <span>已评分 <b>{fmtNum(overview.scored)}</b> 个</span>
@@ -439,7 +447,7 @@ function ScoreSettings({ setting, overview }: { setting: ScoreConfig; overview?:
             {Object.entries(q).map(([k, v]) => (
               <label key={k} className="flex items-center gap-2 text-xs text-fg-subtle">
                 <span className="w-20 shrink-0">{WEIGHT_LABEL[k] ?? k}</span>
-                <input className={input} value={v} onChange={(e) => setQ({ ...q, [k]: e.target.value })} inputMode="decimal" />
+                <input className={input} disabled={locked} value={v} onChange={(e) => setQ({ ...q, [k]: e.target.value })} inputMode="decimal" />
               </label>
             ))}
           </div>
@@ -450,7 +458,7 @@ function ScoreSettings({ setting, overview }: { setting: ScoreConfig; overview?:
             {Object.entries(t).map(([k, v]) => (
               <label key={k} className="flex items-center gap-2 text-xs text-fg-subtle">
                 <span className="w-20 shrink-0">{TGE_WEIGHT_LABEL[k] ?? k}</span>
-                <input className={input} value={v} onChange={(e) => setT({ ...t, [k]: e.target.value })} inputMode="decimal" />
+                <input className={input} disabled={locked} value={v} onChange={(e) => setT({ ...t, [k]: e.target.value })} inputMode="decimal" />
               </label>
             ))}
           </div>
@@ -458,30 +466,49 @@ function ScoreSettings({ setting, overview }: { setting: ScoreConfig; overview?:
       </div>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4">
         <label className="flex flex-col gap-1.5 text-xs text-fg-subtle">建议深研阈值（留空 = 未锁定）
-          <input className={input} value={deep} onChange={(e) => setDeep(e.target.value)} placeholder="例如 75" inputMode="numeric" /></label>
+          <input className={input} disabled={locked} value={deep} onChange={(e) => setDeep(e.target.value)} placeholder="例如 75" inputMode="numeric" /></label>
         <label className="flex flex-col gap-1.5 text-xs text-fg-subtle">纳入观察阈值（留空 = 未锁定）
-          <input className={input} value={watch} onChange={(e) => setWatch(e.target.value)} placeholder="例如 60" inputMode="numeric" /></label>
+          <input className={input} disabled={locked} value={watch} onChange={(e) => setWatch(e.target.value)} placeholder="例如 60" inputMode="numeric" /></label>
         <label className="flex flex-col gap-1.5 text-xs text-fg-subtle">最低置信度（%）
-          <input className={input} value={conf} onChange={(e) => setConf(e.target.value)} inputMode="numeric" /></label>
+          <input className={input} disabled={locked} value={conf} onChange={(e) => setConf(e.target.value)} inputMode="numeric" /></label>
         <label className="flex flex-col gap-1.5 text-xs text-fg-subtle">Robinhood 行动分上限
-          <input className={input} value={cap} onChange={(e) => setCap(e.target.value)} inputMode="numeric" /></label>
+          <input className={input} disabled={locked} value={cap} onChange={(e) => setCap(e.target.value)} inputMode="numeric" /></label>
         <label className="flex flex-col gap-1.5 text-xs text-fg-subtle">市场推断上市折扣（%）
-          <input className={input} value={mi} onChange={(e) => setMi(e.target.value)} inputMode="numeric" /></label>
+          <input className={input} disabled={locked} value={mi} onChange={(e) => setMi(e.target.value)} inputMode="numeric" /></label>
         <label className="flex flex-col gap-1.5 text-xs text-fg-subtle">仅名称线索折扣（%）
-          <input className={input} value={lead} onChange={(e) => setLead(e.target.value)} inputMode="numeric" /></label>
+          <input className={input} disabled={locked} value={lead} onChange={(e) => setLead(e.target.value)} inputMode="numeric" /></label>
         <label className="flex flex-col gap-1.5 text-xs text-fg-subtle">SOL 覆盖折扣（%）
-          <input className={input} value={sol} onChange={(e) => setSol(e.target.value)} inputMode="numeric" /></label>
+          <input className={input} disabled={locked} value={sol} onChange={(e) => setSol(e.target.value)} inputMode="numeric" /></label>
         <label className="flex flex-col gap-1.5 text-xs text-fg-subtle">Robinhood 覆盖折扣（%）
-          <input className={input} value={rh} onChange={(e) => setRh(e.target.value)} inputMode="numeric" /></label>
+          <input className={input} disabled={locked} value={rh} onChange={(e) => setRh(e.target.value)} inputMode="numeric" /></label>
         <label className="flex flex-col gap-1.5 text-xs text-fg-subtle">数据时效（天，超过记红旗）
-          <input className={input} value={stale} onChange={(e) => setStale(e.target.value)} inputMode="numeric" /></label>
+          <input className={input} disabled={locked} value={stale} onChange={(e) => setStale(e.target.value)} inputMode="numeric" /></label>
       </div>
-      <div className="flex items-center gap-3 mt-4">
-        <button onClick={() => save.mutate()} disabled={save.isPending}
-          className="rounded-md bg-fg-base text-background px-3.5 py-1.5 text-sm font-semibold disabled:opacity-50">{save.isPending ? '保存中…' : '保存评分口径'}</button>
-        <span className="text-xs text-fg-subtle">{deep !== '' && watch !== '' ? '保存后开始输出深研 / 观察结论' : '阈值留空：只打分，不输出行动结论'}</span>
-        {save.isSuccess && <span className="text-xs text-fg-subtle">已保存，下次评分生效</span>}
+      <div className="flex flex-wrap items-center gap-3 mt-4">
+        {locked ? (
+          <>
+            <button
+              onClick={() => {
+                const reason = window.prompt('解锁评分口径的原因（至少 4 个字，会记入解锁记录）')
+                if (reason && reason.trim().length >= 4) unlock.mutate(reason.trim())
+              }}
+              disabled={unlock.isPending}
+              className="rounded-md border border-[var(--color-tag-yellow-100)] text-[var(--color-tag-yellow-100)] px-3.5 py-1.5 text-sm font-semibold disabled:opacity-50">
+              {unlock.isPending ? '解锁中…' : '解锁评分口径'}
+            </button>
+            <span className="text-xs text-fg-subtle">锁定中：核心口径不可直接修改。解锁后评分版本 +1，下次评分会生成新版本快照。</span>
+          </>
+        ) : (
+          <>
+            <button onClick={() => save.mutate()} disabled={save.isPending}
+              className="rounded-md bg-fg-base text-background px-3.5 py-1.5 text-sm font-semibold disabled:opacity-50">{save.isPending ? '保存中…' : '保存评分口径'}</button>
+            <span className="text-xs text-fg-subtle">{deep !== '' && watch !== '' ? '保存即锁定，开始输出深研 / 观察结论' : '阈值留空：只打分，不输出行动结论（不会锁定）'}</span>
+          </>
+        )}
+        {(setting.revision ?? 1) > 1 && <span className="text-xs text-fg-subtle">当前口径版本 {setting.version}.r{setting.revision}</span>}
+        {save.isSuccess && !locked && <span className="text-xs text-fg-subtle">已保存，下次评分生效</span>}
         {save.isError && <span className="text-xs text-destructive">{(save.error as Error).message}</span>}
+        {unlock.isError && <span className="text-xs text-destructive">{(unlock.error as Error).message}</span>}
       </div>
     </Section>
   )

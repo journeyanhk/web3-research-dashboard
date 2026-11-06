@@ -322,6 +322,7 @@ async function gatherFacts(ids) {
       project: p,
       identity: ident,
       hard, bonus, completeness, metrics,
+      metricAt, detailFetchedAt: p.detail_fetched_at || null,
       chainStatus, chainSource: p.chain_source || null, chains, campaignChains: p.campaign_chains || [],
       listingLevel, dataAsOf, symbol: p.symbol || null,
       // 线索：只有名称（Surf 未确认身份），且没有任何第二证据（融资 / 公募 / TGE / 上币）

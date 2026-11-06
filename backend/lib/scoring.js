@@ -14,7 +14,10 @@ const SCORE_SNAPSHOT_TYPES = pipeline.SNAPSHOT_TYPES
 // 权重合计为 1；运行时仍会归一化，避免手动改配置后总分漂移。
 const DEFAULT_SCORE_CONFIG = {
   version: SCORE_VERSION,
+  revision: 1, // 解锁后口径变更会 +1，并反映到评分版本（m3.0-draft.r2）
   locked: false, // false = 草案口径，结论只作参考
+  locked_at: null,
+  unlock_log: [], // [{ at, reason }] 每次解锁留痕
   quality_weights: { funding: 0.22, product: 0.2, traction: 0.13, chain: 0.15, evidence: 0.2, momentum: 0.1 },
   tge_weights: { token_plan: 0.35, funding: 0.2, community: 0.2, listing: 0.15, momentum: 0.1 },
   // 链数据覆盖折扣：只作用于行动分，不改「质量分」本身的含义
@@ -74,6 +77,56 @@ async function loadScoreConfig() {
 }
 
 const configHash = (cfg) => crypto.createHash('sha1').update(JSON.stringify(cfg)).digest('hex').slice(0, 16)
+
+// 锁定后不允许再改的核心口径
+const PROTECTED_KEYS = ['quality_weights', 'tge_weights', 'thresholds', 'min_confidence', 'chain_factor', 'market_inferred_factor', 'lead_factor', 'robinhood_action_cap']
+const PROTECTED_LABEL = {
+  quality_weights: '质量分权重', tge_weights: 'TGE 分权重', thresholds: '深研 / 观察阈值', min_confidence: '最低置信度',
+  chain_factor: '链覆盖折扣', market_inferred_factor: '市场推断折扣', lead_factor: '线索折扣', robinhood_action_cap: 'Robinhood 行动分上限',
+}
+
+// 实际评分版本：锁定后解锁并修改口径会递增 revision，历史快照据此区分
+const versionOf = (cfg) => `${cfg.version || SCORE_VERSION}${Number(cfg.revision) > 1 ? `.r${cfg.revision}` : ''}`
+
+function coreValue(cfg, key) {
+  const v = cfg[key]
+  return v && typeof v === 'object' ? JSON.stringify(v) : v
+}
+
+/** 返回与核心口径有关的改动项（空数组 = 没改） */
+function diffCore(oldCfg, newCfg) {
+  return PROTECTED_KEYS.filter((k) => coreValue(oldCfg, k) !== coreValue(newCfg, k))
+}
+
+/** 解锁：留痕 + 版本号 +1（下一次评分会生成新版本快照） */
+function applyUnlock(cfg, reason) {
+  const log = Array.isArray(cfg.unlock_log) ? cfg.unlock_log : []
+  return {
+    ...cfg,
+    locked: false,
+    locked_at: null,
+    revision: (Number(cfg.revision) || 1) + 1,
+    unlock_log: [...log, { at: new Date().toISOString(), reason: String(reason || '').slice(0, 200) }].slice(-20),
+  }
+}
+
+/** 保存配置前的锁定校验：已锁定时修改核心口径必须走解锁流程 */
+function applyConfigChange(oldCfg, nextCfg) {
+  const changed = diffCore(oldCfg, nextCfg)
+  if (oldCfg.locked && changed.length) {
+    throw new Error(`评分口径已锁定，不能直接修改：${changed.map((k) => PROTECTED_LABEL[k] || k).join('、')}。请先解锁并填写原因。`)
+  }
+  if (oldCfg.locked && nextCfg.locked === false) {
+    throw new Error('评分口径已锁定，解除锁定请使用「解锁评分口径」并填写原因。')
+  }
+  const next = { ...nextCfg }
+  if (!oldCfg.locked && next.locked) {
+    const missing = ['deep_research', 'watch'].filter((k) => next.thresholds?.[k] == null)
+    if (missing.length) throw new Error(`锁定时需要填写阈值：${missing.map((k) => (k === 'deep_research' ? '建议深研' : '纳入观察')).join('、')}。`)
+    next.locked_at = new Date().toISOString()
+  }
+  return { next, changed }
+}
 
 // 归一化权重（缺项按 0 处理，避免出现 NaN）
 function weighted(dims, weights) {
@@ -170,9 +223,28 @@ function scoreFacts(f, extras = {}, cfg = DEFAULT_SCORE_CONFIG) {
   const completeness = Object.values(f.completeness || {}).filter(Boolean).length / (pipeline.COMPLETENESS_ITEMS.length || 1)
   const identityFactor = f.identity === 'confirmed' ? 1 : f.identity === 'partial' ? 0.7 : 0.3
   const groupFactor = Math.min(groups.length, 4) / 4
-  const freshnessDays = daysSince(f.dataAsOf)
+  // 数据时效取「关键评分维度里最老的那条」，避免一条今天发生的普通事件把整体数据说成「今天」
+  const metricAt = f.metricAt || {}
+  const keyTimes = [
+    extras.lastFundingAt || null,
+    metricAt.tvl_usd || f.detailFetchedAt || null,
+    metricAt.twitter_followers || null,
+  ].filter(Boolean)
+  const keyAges = keyTimes.map(daysSince).filter((x) => x != null)
+  const freshnessDays = keyAges.length ? Math.max(...keyAges) : daysSince(f.dataAsOf)
   const freshnessFactor = freshnessDays == null ? 0.2 : freshnessDays <= 7 ? 1 : freshnessDays <= 30 ? 0.8 : freshnessDays <= 90 ? 0.5 : 0.3
   const confidence = round1((0.2 * identityFactor + 0.3 * groupFactor + 0.25 * completeness + 0.25 * freshnessFactor) * 100) / 100
+
+  // 数据覆盖率：六个评分维度中，有多少个真的有证据（与链无关）
+  const dimsAvailable = {
+    funding: extras.fundingRounds > 0 || extras.maxFundingUsd > 0 || f.hard?.token_plan === true,
+    product: f.productLevel != null || extras.hasContract || num(f.metrics?.tvl_usd) > 0,
+    traction: num(f.metrics?.twitter_followers) > 0 || num(f.metrics?.tvl_usd) > 0,
+    chain: f.chainStatus !== 'none',
+    evidence: groups.length > 0,
+    momentum: extras.recentEvents > 0 || extras.lastFundingAt != null,
+  }
+  const dataCoverage = Object.values(dimsAvailable).filter(Boolean).length / 6
 
   const dims = {
     funding: fundingDim(extras),
@@ -187,9 +259,9 @@ function scoreFacts(f, extras = {}, cfg = DEFAULT_SCORE_CONFIG) {
   if (f.lead) quality *= num(cfg.lead_factor) || 1
   quality = round1(clamp(quality))
 
-  // 链数据覆盖：多条链时取覆盖最好的那条，避免重复打折
+  // 链数据折扣：多条链时取覆盖最好的那条，避免重复打折
   const factors = (f.chains || []).map((c) => num(cfg.chain_factor?.[c] || 1)).filter((v) => v > 0)
-  const coverage = factors.length ? Math.min(1, Math.max(...factors)) : 0.6
+  const chainFactor = factors.length ? Math.min(1, Math.max(...factors)) : 0.6
 
   const listedConfirmed = f.listingLevel === 'confirmed' || f.project.tge_status === 'post'
   const tgeDims = listedConfirmed ? {} : tgeDim(f, extras)
@@ -200,7 +272,7 @@ function scoreFacts(f, extras = {}, cfg = DEFAULT_SCORE_CONFIG) {
   const actionable = !f.lead && !outOfScope && !inactive && confidence >= num(cfg.min_confidence) && f.chainStatus !== 'none'
   let actionScore = null
   if (actionable) {
-    actionScore = round1(clamp(quality * (0.55 + 0.45 * confidence) * coverage))
+    actionScore = round1(clamp(quality * (0.55 + 0.45 * confidence) * (0.5 + 0.5 * dataCoverage) * chainFactor))
     if ((f.chains || []).includes('robinhood')) actionScore = Math.min(actionScore, num(cfg.robinhood_action_cap) || 100)
   }
 
@@ -228,7 +300,8 @@ function scoreFacts(f, extras = {}, cfg = DEFAULT_SCORE_CONFIG) {
     : f.productLevel === 'low' ? '产品：只有空投任务，未验证真实产品' : '产品：暂无产品证据')
   reasons.push(`链：${(f.chains || []).join(', ') || '未知'}（${pipeline.CHAIN_STATUS_LABEL[f.chainStatus] || f.chainStatus}）`)
   reasons.push(`证据：${groups.length} 个独立来源，完整度 ${Math.round(completeness * 100)}%`)
-  reasons.push(freshnessDays == null ? '数据：没有可用的时间戳' : `数据：${freshnessDays} 天前更新`)
+  reasons.push(freshnessDays == null ? '数据：没有可用的时间戳' : `数据：${freshnessDays} 天前（按融资 / 产品 / 社区中最老的关键数据计算）`)
+  reasons.push(`覆盖：6 个评分维度中 ${Object.values(dimsAvailable).filter(Boolean).length} 个有证据（${Math.round(dataCoverage * 100)}%），链系数 ${chainFactor}`)
   if (f.lead) reasons.push('身份只有名称，评分仅供线索排序，不进入正式结论')
   if (f.listingLevel === 'market_inferred') reasons.push('市值推断已上市但未确认，质量分已打折')
 
@@ -238,7 +311,9 @@ function scoreFacts(f, extras = {}, cfg = DEFAULT_SCORE_CONFIG) {
     action_score: actionScore,
     grade,
     confidence,
-    coverage: round1(coverage * 100) / 100,
+    coverage: round1(dataCoverage * 100) / 100, // 兼容旧字段：现在与 data_coverage 同义
+    data_coverage: round1(dataCoverage * 100) / 100,
+    chain_factor: round1(chainFactor * 100) / 100,
     freshness_days: freshnessDays,
     recommendation,
     dims,
@@ -285,7 +360,8 @@ async function loadExtras(ids) {
 
 const scoreHash = (result, cfgHash) => crypto.createHash('sha1').update(JSON.stringify({
   v: SCORE_VERSION, cfg: cfgHash, q: result.quality_score, t: result.tge_score, a: result.action_score,
-  c: result.confidence, cov: result.coverage, f: result.flags.map((x) => x.code), r: result.recommendation,
+  c: result.confidence, dcv: result.data_coverage, cf: result.chain_factor,
+  f: result.flags.map((x) => x.code), r: result.recommendation,
 })).digest('hex')
 
 /** 批量评分：写最新分到项目表，口径 / 结果变化时追加历史快照 */
@@ -293,6 +369,7 @@ async function scoreProjects(ids = null, { snapshotType = 'historical_runtime' }
   if (!SCORE_SNAPSHOT_TYPES.includes(snapshotType)) throw new Error(`未知快照类型：${snapshotType}`)
   const cfg = await loadScoreConfig()
   const cfgHash = configHash(cfg)
+  const version = versionOf(cfg)
   const targetIds = ids?.length ? ids.map(Number) : (await db.query('SELECT id FROM wr_projects WHERE merged_into IS NULL')).map((r) => r.id)
   const changed = []
   let snapshots = 0
@@ -313,17 +390,18 @@ async function scoreProjects(ids = null, { snapshotType = 'historical_runtime' }
         `UPDATE wr_projects SET quality_score = $2, tge_score = $3, action_score = $4, score_grade = $5,
            score_confidence = $6, score_version = $7, scored_at = now() WHERE id = $1`,
         [p.id, result.quality_score, result.tge_score, result.action_score, result.grade,
-          result.confidence, SCORE_VERSION],
+          result.confidence, version],
       )
       const prev = last[p.id]
-      if (prev && prev.facts_hash === hash && prev.config_hash === cfgHash && prev.score_version === SCORE_VERSION) continue
+      if (prev && prev.facts_hash === hash && prev.config_hash === cfgHash && prev.score_version === version) continue
       await db.query(
         `INSERT INTO wr_scores (project_id, score_version, scoring_rule_version, quality_score, tge_score, action_score,
-           grade, confidence, coverage, freshness_days, recommendation, dims, tge_dims, flags, reasons,
+           grade, confidence, coverage, data_coverage, chain_factor, freshness_days, recommendation, dims, tge_dims, flags, reasons,
            facts_hash, config_hash, snapshot_type, data_as_of)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
-        [p.id, SCORE_VERSION, SCORING_RULE_VERSION, result.quality_score, result.tge_score, result.action_score,
-          result.grade, result.confidence, result.coverage, result.freshness_days, result.recommendation,
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`,
+        [p.id, version, SCORING_RULE_VERSION, result.quality_score, result.tge_score, result.action_score,
+          result.grade, result.confidence, result.coverage, result.data_coverage, result.chain_factor,
+          result.freshness_days, result.recommendation,
           JSON.stringify(result.dims), JSON.stringify(result.tge_dims), JSON.stringify(result.flags),
           JSON.stringify(result.reasons), hash, cfgHash, snapshotType, f.dataAsOf || null],
       )
@@ -331,7 +409,7 @@ async function scoreProjects(ids = null, { snapshotType = 'historical_runtime' }
       changed.push({ id: p.id, name: p.name, quality: result.quality_score, tge: result.tge_score, action: result.action_score, recommendation: result.recommendation })
     }
   }
-  return { version: SCORE_VERSION, rule_version: SCORING_RULE_VERSION, config_hash: cfgHash, locked: !!cfg.locked, scored: targetIds.length, changed, snapshots }
+  return { version, rule_version: SCORING_RULE_VERSION, config_hash: cfgHash, locked: !!cfg.locked, scored: targetIds.length, changed, snapshots }
 }
 
 async function scoreOverview() {
@@ -355,5 +433,6 @@ const SCORE_NOTE = '评分口径为草案：权重、阈值、折扣需观察 1�
 module.exports = {
   SCORE_VERSION, SCORING_RULE_VERSION, SCORE_CONFIG_KEY, SCORE_SNAPSHOT_TYPES, SCORE_NOTE,
   DEFAULT_SCORE_CONFIG, DIM_LABEL, TGE_DIM_LABEL, GRADE_LABEL, FLAG_LABEL, RECOMMENDATION_LABEL,
-  mergeConfig, loadScoreConfig, configHash, scoreFacts, scoreProjects, scoreOverview, loadExtras,
+  PROTECTED_KEYS, PROTECTED_LABEL, mergeConfig, loadScoreConfig, configHash, versionOf, diffCore, applyUnlock, applyConfigChange,
+  scoreFacts, scoreProjects, scoreOverview, loadExtras,
 }

@@ -648,7 +648,7 @@ async function runJob({ job, trigger, steps, cfgOverride = {} }) {
   try {
     const sc = await require('../scoring').scoreProjects()
     ctx.stats.scoring = { scored: sc.scored, snapshots: sc.snapshots, version: sc.version, locked: sc.locked }
-  } catch (e) { ctx.errors.push(`评分：${e.message}`) }
+  } catch (e) { ctx.stats.scoring_failed = true; ctx.errors.push(`评分：${e.message}`) }
   const creditsAfter = await db.one(
     `SELECT COALESCE(sum(actual_credits),0)::float c FROM wr_api_usage WHERE provider = 'surf'`)
   const stats = { ...ctx.stats, surf_credits: +(creditsAfter.c - creditsBefore.c).toFixed(2), budget_blocked: ctx.budgetBlocked, errors: ctx.errors }

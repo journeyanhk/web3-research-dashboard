@@ -638,6 +638,8 @@ function scoreFixture(over = {}) {
     hard: { credible_funding: true, verifiable_product: true, token_plan: false, onchain_activity: null, ecosystem_integration: null },
     completeness: { name: true, domain: true, twitter: true, surf_id: true, contract: true, chains: true, tge: true, funding: true, token_data: false },
     metrics: { twitter_followers: 20000 },
+    metricAt: { twitter_followers: now, tvl_usd: now },
+    detailFetchedAt: now,
     chainStatus: 'core_confirmed',
     chains: ['ethereum'],
     chainSource: 'surf_detail',
@@ -737,7 +739,10 @@ async function scoringTests(results) {
     const cfg = await scoring.loadScoreConfig()
     const good = scoring.scoreFacts(scoreFixture(), scoreExtras(), cfg)
     const nameOnly = scoring.scoreFacts(scoreFixture({ identity: 'name_only', origins: {} }), scoreExtras(), cfg)
-    const stale = scoring.scoreFacts(scoreFixture({ dataAsOf: new Date(Date.now() - 120 * 86400000).toISOString() }), scoreExtras(), cfg)
+    const oldAt = new Date(Date.now() - 120 * 86400000).toISOString()
+    const stale = scoring.scoreFacts(
+      scoreFixture({ dataAsOf: oldAt, metricAt: { twitter_followers: oldAt, tvl_usd: oldAt }, detailFetchedAt: oldAt }),
+      scoreExtras({ lastFundingAt: oldAt, lastEventAt: oldAt }), cfg)
     assert(nameOnly.confidence < good.confidence, '仅名称线索的置信度没有降低')
     assert(stale.confidence < good.confidence, '过期数据置信度没有降低')
     assert(stale.flags.some((f) => f.code === 'stale_data'), '缺少数据过期红旗')
@@ -754,11 +759,54 @@ async function scoringTests(results) {
     const row = await db.one(
       `SELECT score_version, scoring_rule_version, quality_score::float q, dims, flags, reasons, config_hash, snapshot_type
        FROM wr_scores WHERE project_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1`, [target.id])
-    assert(row.score_version === scoring.SCORE_VERSION && row.scoring_rule_version === scoring.SCORING_RULE_VERSION, '版本号未写入')
+    const version = scoring.versionOf(await scoring.loadScoreConfig())
+    assert(row.score_version === version && row.scoring_rule_version === scoring.SCORING_RULE_VERSION, `版本号未写入（期望 ${version}，实际 ${row.score_version}）`)
     assert(row.dims && Object.keys(row.dims).length === 6, '维度没有落库')
     assert(Array.isArray(row.flags) && Array.isArray(row.reasons) && row.config_hash, '红旗 / 理由 / 口径指纹缺失')
     assert(row.snapshot_type === 'manual_recalculate', `快照类型错误：${row.snapshot_type}`)
     return `${target.name}：第二次评分 0 条新快照；版本 ${row.score_version}，口径指纹 ${row.config_hash}`
+  })
+
+  await step(results, '评分', '数据覆盖率与链折扣分开：覆盖率看六个维度，链折扣只作用于行动分', async () => {
+    const cfg = await scoring.loadScoreConfig()
+    const full = scoring.scoreFacts(scoreFixture(), scoreExtras(), cfg)
+    const sparse = scoring.scoreFacts(scoreFixture({
+      chains: [], chainStatus: 'none', productLevel: null, origins: {},
+      metrics: {}, metricAt: {},
+    }), scoreExtras({ fundingRounds: 0, maxFundingUsd: 0, recentEvents: 0, lastFundingAt: null, hasContract: false }), cfg)
+    assert(full.data_coverage === 1, `完整样例的数据覆盖应为 1，实际 ${full.data_coverage}`)
+    assert(sparse.data_coverage < 0.5, `缺少数据的样例覆盖率仍偏高：${sparse.data_coverage}`)
+    const sol = scoring.scoreFacts(scoreFixture({ chains: ['solana'] }), scoreExtras(), cfg)
+    assert(sol.data_coverage === full.data_coverage, '换链不应改变数据覆盖率')
+    assert(sol.chain_factor === 0.9 && full.chain_factor === 1, `链折扣错误：SOL ${sol.chain_factor} / ETH ${full.chain_factor}`)
+    return `完整 ${full.data_coverage}、稀疏 ${sparse.data_coverage}；SOL 链系数 ${sol.chain_factor}、ETH ${full.chain_factor}`
+  })
+
+  await step(results, '评分', '数据时效取关键维度最老的数据，不被新事件拉高', async () => {
+    const cfg = await scoring.loadScoreConfig()
+    const old = new Date(Date.now() - 120 * 86400000).toISOString()
+    const r = scoring.scoreFacts(scoreFixture({ metricAt: { twitter_followers: old, tvl_usd: new Date().toISOString() } }), scoreExtras(), cfg)
+    assert(r.freshness_days >= 100, `社区数据 120 天前，时效却算成 ${r.freshness_days} 天`)
+    return `关键维度最老 120 天 → 数据时效 ${r.freshness_days} 天`
+  })
+
+  await step(results, '评分', '锁定后不能直接改口径；解锁需原因并让版本 +1', async () => {
+    const base = { ...scoring.DEFAULT_SCORE_CONFIG, thresholds: { deep_research: 75, watch: 60 }, locked: true, revision: 1 }
+    let blocked = null
+    try { scoring.applyConfigChange(base, { ...base, min_confidence: 0.5 }) } catch (e) { blocked = e.message }
+    assert(blocked && /已锁定/.test(blocked) && /最低置信度/.test(blocked), `锁定后仍可改口径：${blocked}`)
+    let unlocked = null
+    try { unlocked = scoring.applyUnlock(base, '自检：观察期需要调整') } catch (e) { unlocked = null }
+    assert(unlocked && unlocked.locked === false && unlocked.revision === 2, '解锁失败或版本没有 +1')
+    assert(unlocked.unlock_log?.length === 1 && /观察期/.test(unlocked.unlock_log[0].reason), '解锁原因没有留痕')
+    const { next } = scoring.applyConfigChange(unlocked, { ...unlocked, min_confidence: 0.5 })
+    assert(next.min_confidence === 0.5, '解锁后仍不能改口径')
+    let lockBlocked = null
+    try {
+      scoring.applyConfigChange({ ...scoring.DEFAULT_SCORE_CONFIG }, { ...scoring.DEFAULT_SCORE_CONFIG, locked: true })
+    } catch (e) { lockBlocked = e.message }
+    assert(lockBlocked && /阈值/.test(lockBlocked), '没有阈值也能锁定')
+    return '锁定时拒绝修改并以「最低置信度」提示；解锁留痕、版本 1→2；无阈值不能锁定'
   })
 
   await step(results, '评分', '三个真实项目验收框架（ETH / SOL / Robinhood 各一个）', async () => {

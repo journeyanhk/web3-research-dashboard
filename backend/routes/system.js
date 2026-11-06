@@ -98,16 +98,24 @@ router.put('/settings/:key', wrap(async (req, res) => {
     if (Math.abs(sum - 1) > 0.001) return res.status(400).json({ error: `权重合计需为 1（当前 ${sum.toFixed(2)}）` })
   }
   if (key === 'score_config') {
-    const sumOk = (w) => !w || Math.abs(Object.values(w).reduce((a, b) => a + Number(b), 0) - 1) <= 0.001
-    if (!sumOk(value.quality_weights)) return res.status(400).json({ error: '质量分各维度权重合计需为 1' })
-    if (!sumOk(value.tge_weights)) return res.status(400).json({ error: 'TGE 分各维度权重合计需为 1' })
-    const conf = value.min_confidence == null ? 0.45 : Number(value.min_confidence)
-    if (!(conf >= 0 && conf <= 1)) return res.status(400).json({ error: '最低置信度需在 0–1 之间' })
-    const cap = value.robinhood_action_cap == null ? 60 : Number(value.robinhood_action_cap)
-    if (!(cap >= 0 && cap <= 100)) return res.status(400).json({ error: 'Robinhood 行动分上限需在 0–100 之间' })
+    const scoring = require('../lib/scoring')
+    const old = await scoring.loadScoreConfig()
+    const next = scoring.mergeConfig({ ...old, ...value })
+    const sumOk = (w) => Math.abs(Object.values(w || {}).reduce((a, b) => a + Number(b), 0) - 1) <= 0.001
+    if (!sumOk(next.quality_weights)) return res.status(400).json({ error: '质量分各维度权重合计需为 1' })
+    if (!sumOk(next.tge_weights)) return res.status(400).json({ error: 'TGE 分各维度权重合计需为 1' })
+    if (!(next.min_confidence >= 0 && next.min_confidence <= 1)) return res.status(400).json({ error: '最低置信度需在 0–1 之间' })
+    if (!(next.robinhood_action_cap >= 0 && next.robinhood_action_cap <= 100)) return res.status(400).json({ error: 'Robinhood 行动分上限需在 0–100 之间' })
     for (const k of ['deep_research', 'watch']) {
-      const t = value.thresholds?.[k]
+      const t = next.thresholds?.[k]
       if (t != null && !(Number(t) >= 0 && Number(t) <= 100)) return res.status(400).json({ error: `阈值 ${k} 需在 0–100 之间或留空` })
+    }
+    try {
+      const { next: saved } = scoring.applyConfigChange(old, next)
+      await registry.set('setting', key, saved)
+      return res.json({ ok: true, config: saved })
+    } catch (e) {
+      return res.status(400).json({ error: e.message })
     }
   }
   if (key === 'pipeline_config') {
@@ -119,6 +127,18 @@ router.put('/settings/:key', wrap(async (req, res) => {
   }
   await registry.set('setting', key, value)
   res.json({ ok: true })
+}))
+
+// 解锁评分口径：必须填写原因；版本号 +1，下次评分生成新版本快照
+router.post('/score-config/unlock', wrap(async (req, res) => {
+  const reason = String(req.body?.reason || '').trim()
+  if (reason.length < 4) return res.status(400).json({ error: '请填写解锁原因（至少 4 个字）' })
+  const scoring = require('../lib/scoring')
+  const old = await scoring.loadScoreConfig()
+  if (!old.locked) return res.json({ ok: true, already: true, config: old })
+  const next = scoring.applyUnlock(old, reason)
+  await registry.set('setting', scoring.SCORE_CONFIG_KEY, next)
+  res.json({ ok: true, config: next })
 }))
 
 let running = null
