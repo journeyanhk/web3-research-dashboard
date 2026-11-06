@@ -52,6 +52,9 @@ interface ScoreOverview {
   scored: number; with_quality: number; avg_quality: number | null
   grade_a: number; grade_b: number; grade_c: number; grade_d: number
   actionable: number; last_scored_at: string | null
+  action_confirmed_chain?: number; action_inferred_chain?: number; action_no_chain?: number
+  action_leads?: number; action_market_inferred?: number
+  robinhood_scored?: number; robinhood_max_action?: number | null
 }
 interface EndpointStat { provider: string; endpoint: string; calls: number; cached: number; ok: number; errors: number; est_credits: number; actual_credits: number }
 interface RelProject { id: number; name: string; symbol?: string | null; website_domain?: string | null; twitter_handle?: string | null; chains?: string[] | null }
@@ -437,6 +440,9 @@ function ScoreSettings({ setting, overview }: { setting: ScoreConfig; overview?:
           <span>平均质量分 <b>{overview.avg_quality == null ? '—' : fmtNum(overview.avg_quality, 1)}</b></span>
           <span>A / B / C / D：{overview.grade_a} / {overview.grade_b} / {overview.grade_c} / {overview.grade_d}</span>
           <span>有行动分 {overview.actionable} 个</span>
+          <span title="行动分项目的链状态分布">已确认链 {overview.action_confirmed_chain ?? 0} · 推断链 {overview.action_inferred_chain ?? 0} · 无链 {overview.action_no_chain ?? 0}</span>
+          <span title="必须为 0">线索 / 市场推断有行动分：{overview.action_leads ?? 0} / {overview.action_market_inferred ?? 0}</span>
+          <span title="Robinhood 行动分上限 60">Robinhood 最高行动分 {overview.robinhood_max_action ?? '—'}</span>
           <span className="text-fg-subtle">最近评分 {overview.last_scored_at ? fmtTime(overview.last_scored_at) : '—'}</span>
         </div>
       )}

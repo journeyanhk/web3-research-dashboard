@@ -237,7 +237,8 @@ function scoreFacts(f, extras = {}, cfg = DEFAULT_SCORE_CONFIG) {
 
   // 数据覆盖率：六个评分维度中，有多少个真的有证据（与链无关）
   const dimsAvailable = {
-    funding: extras.fundingRounds > 0 || extras.maxFundingUsd > 0 || f.hard?.token_plan === true,
+    // 融资覆盖只看真实融资轮次 / 金额 / 公募；token_plan（TGE、代币计划）不属于融资证据
+    funding: extras.fundingRounds > 0 || extras.maxFundingUsd > 0 || extras.publicSale === true,
     product: f.productLevel != null || extras.hasContract || num(f.metrics?.tvl_usd) > 0,
     traction: num(f.metrics?.twitter_followers) > 0 || num(f.metrics?.tvl_usd) > 0,
     chain: f.chainStatus !== 'none',
@@ -422,6 +423,13 @@ async function scoreOverview() {
             count(*) FILTER (WHERE score_grade = 'C')::int AS grade_c,
             count(*) FILTER (WHERE score_grade = 'D')::int AS grade_d,
             count(*) FILTER (WHERE action_score IS NOT NULL)::int AS actionable,
+            count(*) FILTER (WHERE action_score IS NOT NULL AND chain_status = 'core_confirmed')::int AS action_confirmed_chain,
+            count(*) FILTER (WHERE action_score IS NOT NULL AND COALESCE(chain_status,'none') = 'inferred')::int AS action_inferred_chain,
+            count(*) FILTER (WHERE action_score IS NOT NULL AND COALESCE(chain_status,'none') = 'none')::int AS action_no_chain,
+            count(*) FILTER (WHERE action_score IS NOT NULL AND (screening_facts->>'lead') = 'true')::int AS action_leads,
+            count(*) FILTER (WHERE action_score IS NOT NULL AND listing_evidence_level = 'market_inferred')::int AS action_market_inferred,
+            count(*) FILTER (WHERE chains ? 'robinhood')::int AS robinhood_scored,
+            max(action_score) FILTER (WHERE chains ? 'robinhood')::float AS robinhood_max_action,
             max(scored_at) AS last_scored_at
      FROM wr_projects WHERE merged_into IS NULL AND score_version IS NOT NULL`)
   return rows[0] || {}

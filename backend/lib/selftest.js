@@ -782,6 +782,23 @@ async function scoringTests(results) {
     return `完整 ${full.data_coverage}、稀疏 ${sparse.data_coverage}；SOL 链系数 ${sol.chain_factor}、ETH ${full.chain_factor}`
   })
 
+  await step(results, '评分', '代币计划不算融资覆盖：只有 token_plan 时融资维度仍是缺数据', async () => {
+    const cfg = await scoring.loadScoreConfig()
+    const withPlan = scoreFixture({
+      project: { id: 0, name: '只有代币计划', stage: 'pending_verify', tge_status: 'pre' },
+      hard: { credible_funding: false, verifiable_product: true, token_plan: true, onchain_activity: null, ecosystem_integration: null },
+    })
+    const noFunding = scoreExtras({ fundingRounds: 0, maxFundingUsd: 0, publicSale: false })
+    const r = scoring.scoreFacts(withPlan, noFunding, cfg)
+    assert(Math.abs(r.data_coverage - 0.83) < 0.011, `只有 token_plan 时覆盖率应缺融资维度（5/6），实际 ${r.data_coverage}`)
+    const sale = scoring.scoreFacts(withPlan, { ...noFunding, publicSale: true }, cfg)
+    assert(sale.data_coverage === 1, `有公募记录时融资维度应有数据，实际覆盖率 ${sale.data_coverage}`)
+    const funded = scoring.scoreFacts(withPlan, scoreExtras(), cfg)
+    assert(funded.data_coverage === 1, `有融资轮次时融资维度应有数据，实际覆盖率 ${funded.data_coverage}`)
+    assert(r.dims.funding === 20, `无融资时融资维度分数应为基础值，实际 ${r.dims.funding}`)
+    return `只有 token_plan → 覆盖 ${r.data_coverage}（缺融资）；有公募 / 融资 → 覆盖 1.0`
+  })
+
   await step(results, '评分', '数据时效取关键维度最老的数据，不被新事件拉高', async () => {
     const cfg = await scoring.loadScoreConfig()
     const old = new Date(Date.now() - 120 * 86400000).toISOString()
