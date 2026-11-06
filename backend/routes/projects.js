@@ -39,7 +39,12 @@ router.post('/relations/:id/decide', wrap(async (req, res) => {
   const rel = await db.one('SELECT project_a, project_b FROM wr_project_relations WHERE id = $1', [Number(req.params.id)])
   const r = await decideRelation(Number(req.params.id), decision)
   // 冲突处理后重新评估相关项目（数据冲突状态会自动解除）
-  if (rel) await pipeline.evaluateProjects([rel.project_a, rel.project_b].filter(Boolean), { snapshotType: 'manual_recalculate' })
+  if (rel) {
+    const ids = [rel.project_a, rel.project_b].filter(Boolean)
+    await pipeline.evaluateProjects(ids, { snapshotType: 'manual_recalculate' })
+    // 合并后项目事实变了，同步重算评分（已合并的一方会自动跳过）
+    await require('../lib/scoring').scoreProjects(ids, { snapshotType: 'manual_recalculate' })
+  }
   res.json(r)
 }))
 
