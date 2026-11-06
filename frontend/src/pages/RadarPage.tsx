@@ -49,7 +49,7 @@ interface RadarOverview {
   chain: string | null
   summary: {
     new_today: number; new_7d: number; total: number; core: number; open_conflicts: number; surf_credits_today: number
-    chain_missing?: number; focus?: number; name_only?: number; listing_unverified?: number; airdrop_chain_only?: number
+    chain_missing?: number; focus?: number; name_only?: number; listing_unverified?: number; airdrop_chain_only?: number; surf_not_found?: number; archive_soon?: number; archived?: number
   }
   funnel?: Record<string, number>
   last_run: RunInfo | null
@@ -255,7 +255,7 @@ function FunnelPanel({ o }: { o: RadarOverview }) {
     </button>
   )
   return (
-    <Panel title="项目漏斗（初筛口径 m2.3）"
+    <Panel title="项目漏斗（初筛口径 m2.3.1）"
       desc={`早期池 ${fmtNum(pool)} 个，其中初筛 ${fmtNum(f.screening ?? 0)} 个${ratio != null ? `（${ratio}%，观察区间 15–30%，不作硬性目标）` : ''}${later ? `；已人工推进 ${fmtNum(later)} 个` : ''}。点击数字查看对应项目。`}>
       <div className="flex flex-col gap-4">
         <div>
@@ -271,7 +271,7 @@ function FunnelPanel({ o }: { o: RadarOverview }) {
             className="rounded-md border border-border-strong px-3 py-2 text-left hover:bg-bg-subtle-hover">
             <div className="text-xs text-fg-subtle">只差确认链</div>
             <div className="text-lg font-bold tabular-nums leading-tight">{fmtNum(o.summary.chain_missing ?? 0)}</div>
-            <div className="text-[11px] text-fg-muted">证据已满足初筛，确认链后即进初筛（不花点数）</div>
+            <div className="text-[11px] text-fg-muted">证据已满足初筛，只缺链；确认为 6 条核心链之一后进初筛（不花点数）</div>
           </button>
           <button onClick={() => go('gate=focus')}
             className="rounded-md border border-border-base px-3 py-2 text-left hover:bg-bg-subtle-hover">
@@ -284,6 +284,7 @@ function FunnelPanel({ o }: { o: RadarOverview }) {
             <div className="text-lg font-bold tabular-nums leading-tight">{fmtNum(o.summary.name_only ?? 0)}</div>
             <div className="text-[11px] text-fg-muted">
               {o.last_backfill ? `上次身份补全 ${fmtTime(o.last_backfill.started_at)}` : '可在「数据与点数」页做一次身份补全'}
+              {(o.summary.surf_not_found ?? 0) > 0 && <> · 其中 Surf 未收录 {fmtNum(o.summary.surf_not_found ?? 0)} 个（不会再重复付费搜索）</>}
             </div>
           </div>
           <button onClick={() => go('listing=inferred')}
@@ -292,6 +293,14 @@ function FunnelPanel({ o }: { o: RadarOverview }) {
             <div className="text-lg font-bold tabular-nums leading-tight">{fmtNum(o.summary.listing_unverified ?? 0)}</div>
             <div className="text-[11px] text-fg-muted">只有市值数据，没有 TGE / 上币确认，暂留早期池</div>
           </button>
+          {(o.summary.archive_soon ?? 0) > 0 && (
+            <button onClick={() => go('stage=dormant')}
+              className="rounded-md border border-[var(--color-tag-orange-100)] px-3 py-2 text-left hover:bg-bg-subtle-hover">
+              <div className="text-xs text-fg-subtle">7 天内将归档</div>
+              <div className="text-lg font-bold tabular-nums leading-tight">{fmtNum(o.summary.archive_soon ?? 0)}</div>
+              <div className="text-[11px] text-fg-muted">休眠满 30 天自动归档，出现新信号会自动恢复</div>
+            </button>
+          )}
           <button onClick={() => go('chain_status=inferred')}
             className="rounded-md border border-border-base px-3 py-2 text-left hover:bg-bg-subtle-hover">
             <div className="text-xs text-fg-subtle">链只来自空投任务</div>

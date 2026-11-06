@@ -61,7 +61,10 @@ router.get('/overview', wrap(async (req, res) => {
             count(*) FILTER (WHERE (p.screening_facts->>'focus') = 'true')::int AS focus,
             count(*) FILTER (WHERE p.identity_status = 'name_only')::int AS name_only,
             count(*) FILTER (WHERE p.listing_evidence_level = 'inferred')::int AS listing_unverified,
-            count(*) FILTER (WHERE p.chain_source = 'airdrop_task')::int AS airdrop_chain_only
+            count(*) FILTER (WHERE p.chain_source = 'airdrop_task')::int AS airdrop_chain_only,
+            count(*) FILTER (WHERE p.identity_status = 'name_only' AND p.flags ? 'surf_not_found')::int AS surf_not_found,
+            count(*) FILTER (WHERE p.stage = 'dormant' AND COALESCE(p.last_signal_at, p.first_seen_at) < now() - interval '23 days')::int AS archive_soon,
+            (SELECT count(*)::int FROM wr_projects q WHERE q.merged_into IS NULL AND q.stage = 'archived') AS archived
      FROM wr_projects p WHERE p.merged_into IS NULL`)
   const lastBackfill = await db.one(
     `SELECT id, trigger, status, started_at, finished_at, stats, error FROM wr_job_runs WHERE job = 'identity_backfill' ORDER BY id DESC LIMIT 1`)

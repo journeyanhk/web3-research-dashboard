@@ -84,6 +84,7 @@ export default function ProjectsPage() {
   const [maturity, setMaturity] = useState('')
   const [chainStatus, setChainStatus] = useState(initialParam('chain_status'))
   const [listing, setListing] = useState(initialParam('listing'))
+  const [flag, setFlag] = useState(initialParam('flag'))
   const [chain, setChain] = useState('')
   const [source, setSource] = useState('')
   const [identity, setIdentity] = useState('')
@@ -93,7 +94,7 @@ export default function ProjectsPage() {
   const [offset, setOffset] = useState(0)
 
   const params = new URLSearchParams()
-  for (const [k, v] of Object.entries({ stage, gate, maturity, chain_status: chainStatus, listing, chain, source, identity, signal, sort, q })) if (v) params.set(k, v)
+  for (const [k, v] of Object.entries({ stage, gate, maturity, chain_status: chainStatus, listing, flag, chain, source, identity, signal, sort, q })) if (v) params.set(k, v)
   params.set('limit', String(PAGE))
   params.set('offset', String(offset))
   const { data, isLoading, error } = useQuery({
@@ -181,6 +182,8 @@ export default function ProjectsPage() {
           options={[['', '全部'], ...Object.entries(MATURITY_LABEL)]} />
         <Select label="链状态" value={chainStatus} onChange={reset(setChainStatus)}
           options={[['', '全部'], ...Object.entries(CHAIN_STATUS_LABEL).map(([k, v]) => [k, v.text] as [string, string])]} />
+        <Select label="数据状态" value={flag} onChange={reset(setFlag)}
+          options={[['', '全部'], ['surf_not_found', 'Surf 未收录'], ['detail_not_found', '详情未取到']]} />
         <Select label="上市证据" value={listing} onChange={reset(setListing)}
           options={[['', '全部'], ...Object.entries(LISTING_LABEL).map(([k, v]) => [k, v.text] as [string, string])]} />
         <Select label="排序" value={sort} onChange={reset(setSort)} options={SORTS} />
