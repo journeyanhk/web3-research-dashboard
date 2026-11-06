@@ -7,6 +7,8 @@ const SORTS = {
   completeness: 'p.completeness DESC NULLS LAST, p.first_seen_at DESC',
   credits: 'p.credits_spent DESC, p.first_seen_at DESC',
   stage_changed: 'p.stage_changed_at DESC NULLS LAST, p.id DESC',
+  score: 'p.quality_score DESC NULLS LAST, p.first_seen_at DESC',
+  action: 'p.action_score DESC NULLS LAST, p.first_seen_at DESC',
 }
 
 function buildWhere(query, { includeStage }) {
@@ -74,6 +76,8 @@ async function listProjects(query = {}) {
             p.maturity_status, p.chain_status, p.chain_source, p.listing_evidence_level, p.campaign_chains, p.last_signal_at, p.reactivated_at, p.tags, p.flags,
             (p.screening_facts->>'qualifies') = 'true' AS qualifies, (p.screening_facts->>'focus') = 'true' AS focus,
             p.screening_facts->>'would_be_stage' AS would_be_stage,
+            p.quality_score::float AS quality_score, p.tge_score::float AS tge_score, p.action_score::float AS action_score,
+            p.score_grade, p.score_confidence::float AS score_confidence, p.score_version, p.scored_at,
             ${FRESHNESS_SQL} AS freshness,
             (SELECT count(*)::int FROM wr_events e WHERE e.project_id = p.id) AS event_count,
             (SELECT count(*)::int FROM wr_notes nt WHERE nt.project_id = p.id) AS note_count

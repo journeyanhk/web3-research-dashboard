@@ -13,7 +13,7 @@ const wrap = (fn) => (req, res) => fn(req, res).catch((e) => {
   res.status(500).json({ error: e.message })
 })
 
-const EDITABLE = new Set(['surf_budget', 'helius_budget', 'coverage_weights', 'robinhood_review_gate', 'discovery_config', 'pipeline_config'])
+const EDITABLE = new Set(['surf_budget', 'helius_budget', 'coverage_weights', 'robinhood_review_gate', 'discovery_config', 'pipeline_config', 'score_config'])
 
 router.get('/overview', wrap(async (_req, res) => {
   await registry.ensureSeeded()
@@ -63,8 +63,10 @@ router.get('/overview', wrap(async (_req, res) => {
       helius_budget: await registry.getSetting('helius_budget'),
       coverage_weights: weights, robinhood_review_gate: gate,
       score_version: await registry.getSetting('score_version'),
+      score_config: require('../lib/scoring').mergeConfig((await registry.getSetting('score_config')) || {}),
       pipeline_config: { ...require('../lib/pipeline').DEFAULT_PIPELINE_CONFIG, ...((await registry.getSetting('pipeline_config')) || {}) },
     },
+    scoring: await require('../lib/scoring').scoreOverview(),
     counts: { open_alerts: openAlerts.c, projects: projects.c },
     last_selftest: lastSelftest,
   })
@@ -94,6 +96,19 @@ router.put('/settings/:key', wrap(async (req, res) => {
   if (key === 'coverage_weights') {
     const sum = Object.values(value).reduce((a, b) => a + Number(b), 0)
     if (Math.abs(sum - 1) > 0.001) return res.status(400).json({ error: `权重合计需为 1（当前 ${sum.toFixed(2)}）` })
+  }
+  if (key === 'score_config') {
+    const sumOk = (w) => !w || Math.abs(Object.values(w).reduce((a, b) => a + Number(b), 0) - 1) <= 0.001
+    if (!sumOk(value.quality_weights)) return res.status(400).json({ error: '质量分各维度权重合计需为 1' })
+    if (!sumOk(value.tge_weights)) return res.status(400).json({ error: 'TGE 分各维度权重合计需为 1' })
+    const conf = value.min_confidence == null ? 0.45 : Number(value.min_confidence)
+    if (!(conf >= 0 && conf <= 1)) return res.status(400).json({ error: '最低置信度需在 0–1 之间' })
+    const cap = value.robinhood_action_cap == null ? 60 : Number(value.robinhood_action_cap)
+    if (!(cap >= 0 && cap <= 100)) return res.status(400).json({ error: 'Robinhood 行动分上限需在 0–100 之间' })
+    for (const k of ['deep_research', 'watch']) {
+      const t = value.thresholds?.[k]
+      if (t != null && !(Number(t) >= 0 && Number(t) <= 100)) return res.status(400).json({ error: `阈值 ${k} 需在 0–100 之间或留空` })
+    }
   }
   if (key === 'pipeline_config') {
     const d = Number(value.dormant_days); const a = Number(value.archive_days)

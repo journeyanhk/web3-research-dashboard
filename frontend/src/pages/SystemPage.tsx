@@ -39,6 +39,19 @@ interface HeliusBudget { quota: number; used: number; ratio: number; level: stri
 interface SelftestResult { group: string; name: string; ok: boolean | null; detail: string; ms?: number }
 interface Selftest { ran_at: string; passed: number; failed: number; results: SelftestResult[] }
 interface SurfBudgetSetting { monthly: number; auto_ratio: number; stage_total_caps: Record<string, number> }
+interface ScoreConfig {
+  version: string; locked: boolean
+  quality_weights: Record<string, number>; tge_weights: Record<string, number>
+  chain_factor: Record<string, number>
+  market_inferred_factor: number; lead_factor: number; stale_days: number
+  min_confidence: number; robinhood_action_cap: number
+  thresholds: { deep_research: number | null; watch: number | null }
+}
+interface ScoreOverview {
+  scored: number; with_quality: number; avg_quality: number | null
+  grade_a: number; grade_b: number; grade_c: number; grade_d: number
+  actionable: number; last_scored_at: string | null
+}
 interface EndpointStat { provider: string; endpoint: string; calls: number; cached: number; ok: number; errors: number; est_credits: number; actual_credits: number }
 interface RelProject { id: number; name: string; symbol?: string | null; website_domain?: string | null; twitter_handle?: string | null; chains?: string[] | null }
 interface Relation { id: number; status: string; reason?: string | null; created_at: string; project_a: RelProject; project_b: RelProject }
@@ -49,7 +62,9 @@ interface Overview {
   settings: {
     surf_budget: SurfBudgetSetting; score_version: string; robinhood_review_gate: { enabled: boolean; validity_days: number; tge_validity_days: number }
     pipeline_config?: PipelineConfig
+    score_config?: ScoreConfig
   }
+  scoring?: ScoreOverview
   counts: { open_alerts: number; projects: number }
   last_selftest: Selftest | null
 }
@@ -357,6 +372,115 @@ function PipelineSettings({ setting }: { setting: PipelineConfig }) {
         <button onClick={() => save.mutate()} disabled={save.isPending}
           className="rounded-md bg-fg-base text-background px-3.5 py-1.5 text-sm font-semibold disabled:opacity-50">{save.isPending ? '保存中…' : '保存'}</button>
         {save.isSuccess && <span className="text-xs text-fg-subtle">已保存</span>}
+        {save.isError && <span className="text-xs text-destructive">{(save.error as Error).message}</span>}
+      </div>
+    </Section>
+  )
+}
+
+
+const WEIGHT_LABEL: Record<string, string> = {
+  funding: '融资质量', product: '产品与链上', traction: '社区热度', chain: '链归属', evidence: '证据强度', momentum: '近期动能',
+}
+const TGE_WEIGHT_LABEL: Record<string, string> = {
+  token_plan: '代币计划', funding: '融资背景', community: '社区基础', listing: '上市线索', momentum: '时间窗口',
+}
+
+function ScoreSettings({ setting, overview }: { setting: ScoreConfig; overview?: ScoreOverview }) {
+  const qc = useQueryClient()
+  const [q, setQ] = useState<Record<string, string>>(Object.fromEntries(Object.entries(setting.quality_weights).map(([k, v]) => [k, String(v)])))
+  const [t, setT] = useState<Record<string, string>>(Object.fromEntries(Object.entries(setting.tge_weights).map(([k, v]) => [k, String(v)])))
+  const [deep, setDeep] = useState(setting.thresholds.deep_research == null ? '' : String(setting.thresholds.deep_research))
+  const [watch, setWatch] = useState(setting.thresholds.watch == null ? '' : String(setting.thresholds.watch))
+  const [conf, setConf] = useState(String(Math.round(setting.min_confidence * 100)))
+  const [cap, setCap] = useState(String(setting.robinhood_action_cap))
+  const [mi, setMi] = useState(String(Math.round(setting.market_inferred_factor * 100)))
+  const [lead, setLead] = useState(String(Math.round(setting.lead_factor * 100)))
+  const [sol, setSol] = useState(String(Math.round((setting.chain_factor.solana ?? 0.9) * 100)))
+  const [rh, setRh] = useState(String(Math.round((setting.chain_factor.robinhood ?? 0.8) * 100)))
+  const [stale, setStale] = useState(String(setting.stale_days))
+  const qSum = Object.values(q).reduce((a, b) => a + Number(b || 0), 0)
+  const tSum = Object.values(t).reduce((a, b) => a + Number(b || 0), 0)
+  const save = useMutation({
+    mutationFn: () => sendJson('system/settings/score_config', 'PUT', {
+      value: {
+        version: setting.version,
+        locked: deep !== '' && watch !== '',
+        quality_weights: Object.fromEntries(Object.entries(q).map(([k, v]) => [k, Number(v)])),
+        tge_weights: Object.fromEntries(Object.entries(t).map(([k, v]) => [k, Number(v)])),
+        thresholds: { deep_research: deep === '' ? null : Number(deep), watch: watch === '' ? null : Number(watch) },
+        min_confidence: Number(conf) / 100,
+        robinhood_action_cap: Number(cap),
+        market_inferred_factor: Number(mi) / 100,
+        lead_factor: Number(lead) / 100,
+        stale_days: Number(stale),
+        chain_factor: { ...setting.chain_factor, solana: Number(sol) / 100, robinhood: Number(rh) / 100 },
+      },
+    }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['system-overview'] }),
+  })
+  const input = 'w-full rounded-md border border-border-base bg-transparent px-2.5 py-1.5 text-sm tabular-nums focus:outline-none focus:border-border-focus'
+  return (
+    <Section title="M3 评分口径（草案）"
+      desc="质量分与 TGE 分分开计算；维度权重、置信度门槛、链覆盖折扣都可调。阈值留空表示「口径未锁定」，系统只打分、不下「建议深研 / 关注」的结论。建议先观察 1–2 天真实数据再填阈值。">
+      {overview && (
+        <div className="flex flex-wrap gap-x-5 gap-y-1 text-sm mb-4">
+          <span>已评分 <b>{fmtNum(overview.scored)}</b> 个</span>
+          <span>平均质量分 <b>{overview.avg_quality == null ? '—' : fmtNum(overview.avg_quality, 1)}</b></span>
+          <span>A / B / C / D：{overview.grade_a} / {overview.grade_b} / {overview.grade_c} / {overview.grade_d}</span>
+          <span>有行动分 {overview.actionable} 个</span>
+          <span className="text-fg-subtle">最近评分 {overview.last_scored_at ? fmtTime(overview.last_scored_at) : '—'}</span>
+        </div>
+      )}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+        <div>
+          <div className="text-xs text-fg-subtle mb-2">质量分权重（合计 {qSum.toFixed(2)}，需为 1）</div>
+          <div className="grid grid-cols-2 gap-2">
+            {Object.entries(q).map(([k, v]) => (
+              <label key={k} className="flex items-center gap-2 text-xs text-fg-subtle">
+                <span className="w-20 shrink-0">{WEIGHT_LABEL[k] ?? k}</span>
+                <input className={input} value={v} onChange={(e) => setQ({ ...q, [k]: e.target.value })} inputMode="decimal" />
+              </label>
+            ))}
+          </div>
+        </div>
+        <div>
+          <div className="text-xs text-fg-subtle mb-2">TGE 分权重（合计 {tSum.toFixed(2)}，需为 1）</div>
+          <div className="grid grid-cols-2 gap-2">
+            {Object.entries(t).map(([k, v]) => (
+              <label key={k} className="flex items-center gap-2 text-xs text-fg-subtle">
+                <span className="w-20 shrink-0">{TGE_WEIGHT_LABEL[k] ?? k}</span>
+                <input className={input} value={v} onChange={(e) => setT({ ...t, [k]: e.target.value })} inputMode="decimal" />
+              </label>
+            ))}
+          </div>
+        </div>
+      </div>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4">
+        <label className="flex flex-col gap-1.5 text-xs text-fg-subtle">建议深研阈值（留空 = 未锁定）
+          <input className={input} value={deep} onChange={(e) => setDeep(e.target.value)} placeholder="例如 75" inputMode="numeric" /></label>
+        <label className="flex flex-col gap-1.5 text-xs text-fg-subtle">纳入观察阈值（留空 = 未锁定）
+          <input className={input} value={watch} onChange={(e) => setWatch(e.target.value)} placeholder="例如 60" inputMode="numeric" /></label>
+        <label className="flex flex-col gap-1.5 text-xs text-fg-subtle">最低置信度（%）
+          <input className={input} value={conf} onChange={(e) => setConf(e.target.value)} inputMode="numeric" /></label>
+        <label className="flex flex-col gap-1.5 text-xs text-fg-subtle">Robinhood 行动分上限
+          <input className={input} value={cap} onChange={(e) => setCap(e.target.value)} inputMode="numeric" /></label>
+        <label className="flex flex-col gap-1.5 text-xs text-fg-subtle">市场推断上市折扣（%）
+          <input className={input} value={mi} onChange={(e) => setMi(e.target.value)} inputMode="numeric" /></label>
+        <label className="flex flex-col gap-1.5 text-xs text-fg-subtle">仅名称线索折扣（%）
+          <input className={input} value={lead} onChange={(e) => setLead(e.target.value)} inputMode="numeric" /></label>
+        <label className="flex flex-col gap-1.5 text-xs text-fg-subtle">SOL 覆盖折扣（%）
+          <input className={input} value={sol} onChange={(e) => setSol(e.target.value)} inputMode="numeric" /></label>
+        <label className="flex flex-col gap-1.5 text-xs text-fg-subtle">Robinhood 覆盖折扣（%）
+          <input className={input} value={rh} onChange={(e) => setRh(e.target.value)} inputMode="numeric" /></label>
+        <label className="flex flex-col gap-1.5 text-xs text-fg-subtle">数据时效（天，超过记红旗）
+          <input className={input} value={stale} onChange={(e) => setStale(e.target.value)} inputMode="numeric" /></label>
+      </div>
+      <div className="flex items-center gap-3 mt-4">
+        <button onClick={() => save.mutate()} disabled={save.isPending}
+          className="rounded-md bg-fg-base text-background px-3.5 py-1.5 text-sm font-semibold disabled:opacity-50">{save.isPending ? '保存中…' : '保存评分口径'}</button>
+        <span className="text-xs text-fg-subtle">{deep !== '' && watch !== '' ? '保存后开始输出深研 / 观察结论' : '阈值留空：只打分，不输出行动结论'}</span>
+        {save.isSuccess && <span className="text-xs text-fg-subtle">已保存，下次评分生效</span>}
         {save.isError && <span className="text-xs text-destructive">{(save.error as Error).message}</span>}
       </div>
     </Section>
@@ -744,6 +868,7 @@ export default function SystemPage() {
           <SelftestPanel last={data.last_selftest} />
           {data.settings.surf_budget && <BudgetSettings setting={data.settings.surf_budget} />}
           {data.settings.pipeline_config && <PipelineSettings setting={data.settings.pipeline_config} />}
+          {data.settings.score_config && <ScoreSettings setting={data.settings.score_config} overview={data.scoring} />}
           <UsageLog />
         </>
       )}

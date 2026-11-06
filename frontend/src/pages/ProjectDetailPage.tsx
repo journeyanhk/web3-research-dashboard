@@ -4,6 +4,7 @@ import { getJson, sendJson, fmtNum, fmtTime, fmtAgo } from '@/lib/fetcher'
 import {
   STAGE_LABEL, STAGE_ORDER, IDENTITY_LABEL, SOURCE_LABEL, TGE_LABEL, LINK_LABEL, CONFIDENCE_LABEL, ID_TYPE_LABEL, FRESHNESS_LABEL, chainText,
   CHAINS, MATURITY_LABEL, CHAIN_STATUS_LABEL, CHAIN_SOURCE_LABEL, GROUP_LABEL, LISTING_LABEL, SNAPSHOT_TYPE_LABEL,
+  SCORE_DIM_LABEL, TGE_DIM_LABEL, SCORE_GRADE_LABEL, SCORE_FLAG_LABEL, SCORE_RECOMMENDATION_LABEL,
 } from '@/lib/labels'
 
 interface Evidence {
@@ -76,6 +77,27 @@ interface Project {
   flags?: string[] | null
 }
 interface Snapshot { id: number; rule_version: string; stage: string; stage_reason?: string | null; created_at: string; groups?: string[] | null; qualifies?: string | null; chain_status?: string | null; maturity?: string | null; snapshot_type?: string | null; data_as_of?: string | null; listing_evidence_level?: string | null }
+interface ScoreFlag { code: string; label: string; level: string }
+interface ScoreRow {
+  id: number
+  score_version: string
+  scoring_rule_version: string
+  quality_score: number | null
+  tge_score: number | null
+  action_score: number | null
+  grade: string
+  confidence: number | null
+  coverage: number | null
+  freshness_days: number | null
+  recommendation: string
+  dims?: Record<string, number> | null
+  tge_dims?: Record<string, number> | null
+  flags?: ScoreFlag[] | null
+  reasons?: string[] | null
+  snapshot_type?: string | null
+  data_as_of?: string | null
+  created_at: string
+}
 interface Detail {
   project: Project
   identifiers: { id_type: string; id_value: string; source?: string | null; created_at: string }[]
@@ -94,7 +116,144 @@ interface Detail {
   notes: { id: number; body: string; created_at: string; updated_at: string }[]
   ambiguous: { id: number; event_type: string; title?: string | null; event_at?: string | null }[]
   snapshots?: Snapshot[]
+  scores?: ScoreRow[]
+  score?: ScoreRow | null
   redirect?: number
+}
+
+const pct = (v: number | null | undefined) => (v == null ? '—' : `${Math.round(v * 100)}%`)
+const flagCls: Record<string, string> = {
+  risk: 'text-destructive border-destructive/40',
+  warn: 'text-[var(--color-tag-yellow-100)] border-[var(--color-tag-yellow-100)]/40',
+  info: 'text-fg-subtle border-border-base',
+}
+
+function DimBars({ dims, labels }: { dims?: Record<string, number> | null; labels: Record<string, string> }) {
+  const entries = Object.entries(dims ?? {})
+  if (!entries.length) return <p className="text-xs text-fg-subtle">无维度数据。</p>
+  return (
+    <ul className="flex flex-col gap-1.5">
+      {entries.map(([k, v]) => (
+        <li key={k} className="flex items-center gap-2 text-xs">
+          <span className="w-16 shrink-0 text-fg-subtle">{labels[k] ?? k}</span>
+          <span className="flex-1 h-1.5 rounded bg-bg-subtle overflow-hidden">
+            <span className="block h-full rounded bg-fg-base/60" style={{ width: `${Math.max(0, Math.min(100, Number(v)))}%` }} />
+          </span>
+          <span className="w-8 text-right tabular-nums text-fg-muted">{Math.round(Number(v))}</span>
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+function ScoreCard({ projectId, score, scores }: { projectId: number; score?: ScoreRow | null; scores?: ScoreRow[] }) {
+  const qc = useQueryClient()
+  const [openHistory, setOpenHistory] = useState(false)
+  const recalc = useMutation({
+    mutationFn: () => sendJson(`projects/${projectId}/score`, 'POST', {}),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['project', projectId] }),
+  })
+  const history = scores ?? []
+  return (
+    <Card
+      title="评分"
+      desc="质量分回答「项目本身值不值得研究」，TGE 分回答「代币机会是否临近」，两者分开。当前为草案口径，阈值未锁定，暂不产出「建议深研 / 关注」结论。"
+      right={<button onClick={() => recalc.mutate()} disabled={recalc.isPending}
+        className="rounded-md border border-border-strong px-2.5 py-1 text-xs hover:bg-bg-subtle-hover disabled:opacity-50">
+        {recalc.isPending ? '评分中…' : '重新评分'}
+      </button>}
+    >
+      {!score ? (
+        <p className="text-sm text-fg-subtle">还没有评分。每日采集后自动评分；也可以点右上角「重新评分」，不消耗点数。</p>
+      ) : (
+        <>
+          <div className="flex items-end justify-between gap-3">
+            <div>
+              <div className="text-xs text-fg-subtle">质量分</div>
+              <div className="flex items-baseline gap-2">
+                <span className="text-3xl font-bold tabular-nums">{score.quality_score ?? '—'}</span>
+                <span className={`text-lg font-semibold ${SCORE_GRADE_LABEL[score.grade]?.cls ?? ''}`}>{SCORE_GRADE_LABEL[score.grade]?.text ?? score.grade}</span>
+              </div>
+            </div>
+            <div className="text-right">
+              <div className="text-xs text-fg-subtle">当前建议</div>
+              <div className={`text-sm font-semibold ${SCORE_RECOMMENDATION_LABEL[score.recommendation]?.cls ?? ''}`}>
+                {SCORE_RECOMMENDATION_LABEL[score.recommendation]?.text ?? score.recommendation}
+              </div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3 mt-4 text-sm">
+            <div className="border border-border-base rounded-md px-3 py-2">
+              <div className="text-[11px] text-fg-subtle">TGE 分</div>
+              <div className="text-lg font-semibold tabular-nums">{score.tge_score ?? '—'}</div>
+              <div className="text-[11px] text-fg-muted">{score.tge_score == null ? '已 TGE / 无 TGE 机会' : '代币计划与时间窗口'}</div>
+            </div>
+            <div className="border border-border-base rounded-md px-3 py-2">
+              <div className="text-[11px] text-fg-subtle">行动分</div>
+              <div className="text-lg font-semibold tabular-nums">{score.action_score ?? '—'}</div>
+              <div className="text-[11px] text-fg-muted">{score.action_score == null ? '线索 / 不在早期池 / 置信度不足' : '质量分 × 置信度 × 链覆盖'}</div>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap gap-x-4 gap-y-1 mt-3 text-[11px] text-fg-muted">
+            <span>置信度 {pct(score.confidence)}</span>
+            <span>数据覆盖 {pct(score.coverage)}</span>
+            <span>数据时效 {score.freshness_days == null ? '—' : `${score.freshness_days} 天前`}</span>
+            <span>口径 {score.score_version} · {score.scoring_rule_version}</span>
+          </div>
+
+          {(score.flags ?? []).length > 0 && (
+            <div className="flex flex-wrap gap-1.5 mt-3">
+              {(score.flags ?? []).map((f) => (
+                <span key={f.code} className={`text-[11px] px-1.5 py-0.5 rounded border ${flagCls[f.level] ?? flagCls.info}`}>
+                  {SCORE_FLAG_LABEL[f.code]?.text ?? f.label}
+                </span>
+              ))}
+            </div>
+          )}
+
+          <div className="mt-4">
+            <div className="text-xs text-fg-subtle mb-1.5">质量分维度</div>
+            <DimBars dims={score.dims} labels={SCORE_DIM_LABEL} />
+          </div>
+          {score.tge_dims && Object.keys(score.tge_dims).length > 0 && (
+            <div className="mt-3">
+              <div className="text-xs text-fg-subtle mb-1.5">TGE 分维度</div>
+              <DimBars dims={score.tge_dims} labels={TGE_DIM_LABEL} />
+            </div>
+          )}
+
+          {(score.reasons ?? []).length > 0 && (
+            <ul className="mt-3 flex flex-col gap-1 text-[11px] text-fg-muted">
+              {(score.reasons ?? []).map((r, i) => <li key={i}>· {r}</li>)}
+            </ul>
+          )}
+
+          {history.length > 0 && (
+            <div className="mt-3">
+              <button onClick={() => setOpenHistory((v) => !v)} className="text-xs text-fg-subtle hover:underline">
+                {openHistory ? '收起评分历史' : `评分历史（${history.length}）`}
+              </button>
+              {openHistory && (
+                <ul className="flex flex-col text-[11px] mt-1.5">
+                  {history.map((h) => (
+                    <li key={h.id} className="border-t border-border-base py-1 first:border-t-0 flex justify-between gap-2">
+                      <span>
+                        质量 {h.quality_score ?? '—'} · TGE {h.tge_score ?? '—'} · 行动 {h.action_score ?? '—'}
+                        <span className="text-fg-subtle ml-1.5">{SNAPSHOT_TYPE_LABEL[h.snapshot_type ?? ''] ?? h.snapshot_type ?? ''}</span>
+                      </span>
+                      <span className="text-fg-muted shrink-0">{fmtTime(h.created_at)}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+        </>
+      )}
+    </Card>
+  )
 }
 
 const METRIC_LABEL: Record<string, string> = {
@@ -455,6 +614,7 @@ export default function ProjectDetailPage({ id }: { id: number }) {
         </div>
 
         <div className="flex flex-col gap-5">
+          <ScoreCard projectId={p.id} score={data.score} scores={data.scores} />
           <Card title="资料完整度" right={<span className="text-xl font-bold tabular-nums">{completeness != null ? `${completeness}%` : '—'}</span>}>
             <ul className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-sm">
               {Object.entries(facts.completeness ?? {}).map(([k, c]) => (

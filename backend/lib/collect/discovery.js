@@ -644,6 +644,11 @@ async function runJob({ job, trigger, steps, cfgOverride = {} }) {
     ctx.stats.pipeline = { evaluated: ev.evaluated, changed: ev.changed.length,
       to_screening: ev.changed.filter((c) => c.to === 'screening').length }
   } catch (e) { ctx.errors.push(`阶段评估：${e.message}`) }
+  // M3：按当前草案口径重新评分（只读数据库，不花点数；结果没变不会新增历史快照）
+  try {
+    const sc = await require('../scoring').scoreProjects()
+    ctx.stats.scoring = { scored: sc.scored, snapshots: sc.snapshots, version: sc.version, locked: sc.locked }
+  } catch (e) { ctx.errors.push(`评分：${e.message}`) }
   const creditsAfter = await db.one(
     `SELECT COALESCE(sum(actual_credits),0)::float c FROM wr_api_usage WHERE provider = 'surf'`)
   const stats = { ...ctx.stats, surf_credits: +(creditsAfter.c - creditsBefore.c).toFixed(2), budget_blocked: ctx.budgetBlocked, errors: ctx.errors }

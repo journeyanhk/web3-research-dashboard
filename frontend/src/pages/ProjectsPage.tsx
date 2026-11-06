@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { getJson, sendJson, fmtNum, fmtTime, fmtAgo } from '@/lib/fetcher'
-import { CHAINS, STAGE_LABEL, STAGE_ORDER, IDENTITY_LABEL, SOURCE_LABEL, TGE_LABEL, FRESHNESS_LABEL, MATURITY_LABEL, CHAIN_STATUS_LABEL, CHAIN_SOURCE_LABEL, LISTING_LABEL, OUT_OF_POOL_STAGES, chainText } from '@/lib/labels'
+import { CHAINS, STAGE_LABEL, STAGE_ORDER, IDENTITY_LABEL, SOURCE_LABEL, TGE_LABEL, FRESHNESS_LABEL, MATURITY_LABEL, CHAIN_STATUS_LABEL, CHAIN_SOURCE_LABEL, LISTING_LABEL, OUT_OF_POOL_STAGES, SCORE_GRADE_LABEL, chainText } from '@/lib/labels'
 
 interface PoolRow {
   id: number
@@ -37,6 +37,13 @@ interface PoolRow {
   qualifies?: boolean | null
   focus?: boolean | null
   would_be_stage?: string | null
+  quality_score?: number | null
+  tge_score?: number | null
+  action_score?: number | null
+  score_grade?: string | null
+  score_confidence?: number | null
+  score_version?: string | null
+  scored_at?: string | null
 }
 
 // 从地址读取初始筛选（雷达页的「只差确认链」等入口会带上 ?gate=）
@@ -58,7 +65,7 @@ interface PoolResponse {
 }
 
 const SORTS: [string, string][] = [
-  ['first_seen', '首次发现'], ['last_event', '最近事件'], ['stage_changed', '阶段变更'], ['completeness', '资料完整度'], ['credits', '已用点数'],
+  ['first_seen', '首次发现'], ['last_event', '最近事件'], ['stage_changed', '阶段变更'], ['score', '质量分'], ['action', '行动分'], ['completeness', '资料完整度'], ['credits', '已用点数'],
 ]
 const PAGE = 50
 
@@ -200,7 +207,7 @@ export default function ProjectsPage() {
             <p className="text-sm text-fg-subtle p-5">没有符合条件的项目。</p>
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full text-sm min-w-[1140px]">
+              <table className="w-full text-sm min-w-[1240px]">
                 <thead>
                   <tr className="text-left text-xs text-fg-muted">
                     <th className="font-normal py-2 pl-5">项目</th>
@@ -208,6 +215,7 @@ export default function ProjectsPage() {
                     <th className="font-normal py-2">信号</th>
                     <th className="font-normal py-2">身份</th>
                     <th className="font-normal py-2">链</th>
+                    <th className="font-normal py-2 text-right" title="M3 评分：质量分 / TGE 分 / 行动分（草案口径，阈值未锁定）">评分</th>
                     <th className="font-normal py-2 text-right">资料完整度</th>
                     <th className="font-normal py-2">数据新鲜度</th>
                     <th className="font-normal py-2">TGE</th>
@@ -248,6 +256,18 @@ export default function ProjectsPage() {
                           {(() => { const c = CHAIN_STATUS_LABEL[p.chain_status ?? 'none'] ?? CHAIN_STATUS_LABEL.none; return <div className={`text-[11px] ${c.cls}`}>{c.text}</div> })()}
                           {p.maturity_status && p.maturity_status !== 'unknown' && <div className="text-[11px] text-fg-muted">{MATURITY_LABEL[p.maturity_status] ?? p.maturity_status}</div>}
                           {p.listing_evidence_level === 'inferred' && <div className="text-[11px] text-[var(--color-tag-orange-100)]" title={LISTING_LABEL.inferred.tip}>可能已上市·待核实</div>}
+                        </td>
+                        <td className="py-2 pr-3 text-right whitespace-nowrap" title={p.scored_at ? `评分 ${p.score_version ?? ''} · ${fmtTime(p.scored_at)}` : '尚未评分'}>
+                          {p.quality_score == null ? <span className="text-fg-muted">—</span> : (
+                            <>
+                              <div className="tabular-nums">{p.quality_score}
+                                <span className={`ml-1 text-[11px] font-semibold ${SCORE_GRADE_LABEL[p.score_grade ?? '']?.cls ?? ''}`}>{SCORE_GRADE_LABEL[p.score_grade ?? '']?.text ?? ''}</span>
+                              </div>
+                              <div className="text-[11px] text-fg-muted">
+                                TGE {p.tge_score ?? '—'} · 行动 {p.action_score ?? '—'}
+                              </div>
+                            </>
+                          )}
                         </td>
                         <td className="py-2 pr-3 text-right tabular-nums">{p.completeness != null ? `${Math.round(p.completeness * 100)}%` : '—'}</td>
                         <td className="py-2 pr-3 whitespace-nowrap" title={`最近事件 ${fmtAgo(p.last_event_at)} · 最近详情 ${fmtAgo(p.last_detail_at)} · 最近指标 ${fmtAgo(p.last_metric_at)}`}>

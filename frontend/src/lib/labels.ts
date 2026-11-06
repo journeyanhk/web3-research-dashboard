@@ -44,6 +44,35 @@ export const LISTING_LABEL: Record<string, { text: string; cls: string; tip: str
 export const SNAPSHOT_TYPE_LABEL: Record<string, string> = {
   historical_runtime: '当时运行', migration_backfill: '迁移重算', manual_recalculate: '人工重算',
 }
+// M3 评分（草案口径）：维度 / 等级 / 红旗 / 建议
+export const SCORE_DIM_LABEL: Record<string, string> = {
+  funding: '融资质量', product: '产品与链上', traction: '社区热度', chain: '链归属', evidence: '证据强度', momentum: '近期动能',
+}
+export const TGE_DIM_LABEL: Record<string, string> = {
+  token_plan: '代币计划', funding: '融资背景', community: '社区基础', listing: '上市线索', momentum: '时间窗口',
+}
+export const SCORE_GRADE_LABEL: Record<string, { text: string; cls: string }> = {
+  A: { text: 'A', cls: 'text-[var(--color-tag-cyan-100)]' }, B: { text: 'B', cls: 'text-fg-base' },
+  C: { text: 'C', cls: 'text-[var(--color-tag-yellow-100)]' }, D: { text: 'D', cls: 'text-fg-muted' },
+}
+export const SCORE_FLAG_LABEL: Record<string, { text: string; level: string }> = {
+  lead: { text: '仅名称线索', level: 'warn' }, market_inferred: { text: '可能已上市（未确认）', level: 'warn' },
+  chain_inferred: { text: '链为文字推断', level: 'warn' }, chain_missing: { text: '缺所属链', level: 'warn' },
+  airdrop_chain_only: { text: '链仅来自空投任务', level: 'risk' }, no_funding: { text: '无融资记录', level: 'info' },
+  no_product: { text: '无产品 / 链上证据', level: 'info' }, stale_data: { text: '数据超过时效', level: 'warn' },
+  robinhood_review: { text: 'Robinhood 需人工复核', level: 'risk' }, conflict: { text: '身份冲突', level: 'risk' },
+  listed: { text: '已上市', level: 'info' }, out_of_scope: { text: '不在早期池', level: 'info' }, low_confidence: { text: '置信度不足', level: 'warn' },
+}
+export const SCORE_RECOMMENDATION_LABEL: Record<string, { text: string; cls: string }> = {
+  pending_thresholds: { text: '口径待锁定', cls: 'text-fg-subtle' },
+  deep_research: { text: '建议深研', cls: 'text-[var(--color-tag-cyan-100)]' },
+  watch: { text: '纳入观察', cls: 'text-fg-base' },
+  skip: { text: '暂不跟进', cls: 'text-fg-muted' },
+  insufficient_data: { text: '数据不足', cls: 'text-[var(--color-tag-yellow-100)]' },
+  lead_only: { text: '线索（不做决策）', cls: 'text-[var(--color-tag-orange-100)]' },
+  inactive: { text: '已休眠 / 归档', cls: 'text-fg-muted' },
+  out_of_scope: { text: '不在早期池', cls: 'text-fg-muted' },
+}
 export const GROUP_LABEL: Record<string, string> = {
   surf_project: 'Surf 项目数据', surf_fundraising: 'Surf 融资数据', official_project: '官方 / 人工确认',
   onchain: '链上数据', github: 'GitHub', market_data: '市场数据', external_news: '外部新闻',

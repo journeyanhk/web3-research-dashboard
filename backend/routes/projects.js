@@ -89,10 +89,13 @@ router.post('/events/:id/link', wrap(async (req, res) => {
 // ───────── 项目池（M2）─────────
 
 router.get('/meta', wrap(async (_req, res) => {
+  const scoring = require('../lib/scoring')
   res.json({
     stages: pipeline.STAGES, completeness: pipeline.COMPLETENESS_ITEMS,
     maturity: pipeline.MATURITY_LABEL, chain_status: pipeline.CHAIN_STATUS_LABEL, chain_source: pipeline.CHAIN_SOURCE_LABEL, listing: pipeline.LISTING_EVIDENCE_LABEL,
     groups: pipeline.GROUP_LABEL, core_chains: pipeline.CORE_CHAINS, screening_rule_version: pipeline.SCREENING_RULE_VERSION,
+    score_version: scoring.SCORE_VERSION, score_dims: scoring.DIM_LABEL, tge_dims: scoring.TGE_DIM_LABEL,
+    score_grades: scoring.GRADE_LABEL, score_flags: scoring.FLAG_LABEL, score_recommendations: scoring.RECOMMENDATION_LABEL,
   })
 }))
 
@@ -104,7 +107,10 @@ router.get('/', wrap(async (req, res) => {
 }))
 
 router.post('/evaluate', wrap(async (_req, res) => {
-  res.json(await pipeline.evaluateProjects(null, { snapshotType: 'manual_recalculate' }))
+  const r = await pipeline.evaluateProjects(null, { snapshotType: 'manual_recalculate' })
+  // M3：阶段重算后同步按当前口径重新评分
+  const sc = await require('../lib/scoring').scoreProjects(null, { snapshotType: 'manual_recalculate' })
+  res.json({ ...r, scoring: { scored: sc.scored, snapshots: sc.snapshots, version: sc.version, locked: sc.locked } })
 }))
 
 router.get('/:id(\\d+)', wrap(async (req, res) => {
@@ -116,7 +122,7 @@ router.get('/:id(\\d+)', wrap(async (req, res) => {
      WHERE p.id = $1`, [id])
   if (!p) return res.status(404).json({ error: '项目不存在' })
   if (p.merged_into) return res.json({ redirect: p.merged_into })
-  const [identifiers, events, metrics, credits, relations, history, notes, ambiguous, snapshots] = await Promise.all([
+  const [identifiers, events, metrics, credits, relations, history, notes, ambiguous, snapshots, scores] = await Promise.all([
     db.query('SELECT id_type, id_value, source, created_at FROM wr_project_ids WHERE project_id = $1 ORDER BY id_type, created_at', [id]),
     db.query(
       `SELECT id, event_type, title, summary, url, source_name, importance, chains, candidate_name, link_method, link_confidence,
@@ -148,8 +154,21 @@ router.get('/:id(\\d+)', wrap(async (req, res) => {
               facts->'independence_groups' AS groups, facts->>'qualifies' AS qualifies, facts->>'chain_status' AS chain_status,
               facts->>'maturity' AS maturity, facts->>'listing_evidence_level' AS listing_evidence_level
        FROM wr_screening_snapshots WHERE project_id = $1 ORDER BY created_at DESC, id DESC LIMIT 20`, [id]),
+    db.query(
+      `SELECT id, score_version, scoring_rule_version, quality_score::float AS quality_score, tge_score::float AS tge_score,
+              action_score::float AS action_score, grade, confidence::float AS confidence, coverage::float AS coverage,
+              freshness_days, recommendation, dims, tge_dims, flags, reasons, snapshot_type, data_as_of, created_at
+       FROM wr_scores WHERE project_id = $1 ORDER BY created_at DESC, id DESC LIMIT 20`, [id]),
   ])
-  res.json({ project: p, identifiers, events, metrics, credits, relations, history, notes, ambiguous, snapshots })
+  res.json({ project: p, identifiers, events, metrics, credits, relations, history, notes, ambiguous, snapshots, scores, score: scores[0] || null })
+}))
+
+// M3：人工触发单个项目重新评分（只读数据库，不花点数）
+router.post('/:id(\\d+)/score', wrap(async (req, res) => {
+  const p = await db.one('SELECT id FROM wr_projects WHERE id = $1 AND merged_into IS NULL', [Number(req.params.id)])
+  if (!p) return res.status(404).json({ error: '项目不存在' })
+  const r = await require('../lib/scoring').scoreProjects([p.id], { snapshotType: 'manual_recalculate' })
+  res.json(r)
 }))
 
 // 人工确认所属链（M2.3）：不花点数，确认后立即重新评估

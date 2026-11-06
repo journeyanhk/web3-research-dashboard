@@ -244,7 +244,8 @@ async function runSelftest() {
   // ───── 部署前检查（M2.1）─────
   await deployTests(results)
 
-  results.push({ group: '评分', name: '三个真实项目的评分验收', ok: null, detail: '评分模块在 M3 完成后执行（ETH / SOL / Robinhood Chain 各一个）' })
+  // ───── 评分（M3 框架）─────
+  await scoringTests(results)
 
   const summary = {
     ran_at: new Date().toISOString(),
@@ -628,4 +629,156 @@ async function deployTests(results) {
   })
 }
 
-module.exports = { runSelftest }
+// ───── M3 评分框架验收：结构与不变量为主，权重 / 阈值等真实数据稳定后再锁定 ─────
+function scoreFixture(over = {}) {
+  const now = new Date().toISOString()
+  return {
+    project: { id: 0, name: '自检样例', stage: 'pending_verify', tge_status: 'pre', ...(over.project || {}) },
+    identity: 'confirmed',
+    hard: { credible_funding: true, verifiable_product: true, token_plan: false, onchain_activity: null, ecosystem_integration: null },
+    completeness: { name: true, domain: true, twitter: true, surf_id: true, contract: true, chains: true, tge: true, funding: true, token_data: false },
+    metrics: { twitter_followers: 20000 },
+    chainStatus: 'core_confirmed',
+    chains: ['ethereum'],
+    chainSource: 'surf_detail',
+    listingLevel: 'none',
+    dataAsOf: now,
+    lead: false,
+    conflict: false,
+    productLevel: 'high',
+    origins: {
+      credible_funding: new Set(['surf_fundraising']),
+      verifiable_product: new Set(['onchain']),
+      multi_source: new Set(['multi']),
+    },
+    ...over,
+  }
+}
+
+const scoreExtras = (over = {}) => ({
+  fundingRounds: 2, maxFundingUsd: 8e6, publicSale: false, listingEvents: 0, tgeStatus: 'pre',
+  recentEvents: 3, lastEventAt: new Date().toISOString(), lastFundingAt: new Date().toISOString(),
+  airdropTask: false, hasContract: true, ...over,
+})
+
+async function scoringTests(results) {
+  const scoring = require('./scoring')
+
+  await step(results, '评分', '评分口径可配置且权重合计为 1（当前为草案，未锁定）', async () => {
+    const cfg = await scoring.loadScoreConfig()
+    const q = Object.values(cfg.quality_weights).reduce((a, b) => a + Number(b), 0)
+    const t = Object.values(cfg.tge_weights).reduce((a, b) => a + Number(b), 0)
+    assert(Math.abs(q - 1) <= 0.001, `质量分权重合计 ${q}`)
+    assert(Math.abs(t - 1) <= 0.001, `TGE 分权重合计 ${t}`)
+    assert(cfg.locked === false, '当前不应锁定口径')
+    assert(cfg.thresholds.deep_research == null && cfg.thresholds.watch == null, '阈值应保持未锁定')
+    return `${scoring.SCORE_VERSION}，质量分 / TGE 分权重均合计 1，阈值未锁定`
+  })
+
+  await step(results, '评分', '同一事实两次评分结果一致，分数都在 0–100', async () => {
+    const cfg = await scoring.loadScoreConfig()
+    const a = scoring.scoreFacts(scoreFixture(), scoreExtras(), cfg)
+    const b = scoring.scoreFacts(scoreFixture(), scoreExtras(), cfg)
+    assert(JSON.stringify(a) === JSON.stringify(b), '同样输入得到了不同结果')
+    for (const k of ['quality_score', 'tge_score', 'action_score']) {
+      assert(a[k] == null || (a[k] >= 0 && a[k] <= 100), `${k} 越界：${a[k]}`)
+    }
+    assert(a.confidence >= 0 && a.confidence <= 1, `置信度越界：${a.confidence}`)
+    assert(a.coverage > 0 && a.coverage <= 1, `覆盖率越界：${a.coverage}`)
+    assert(a.dims && Object.keys(a.dims).length === 6, '维度不完整')
+    return `质量 ${a.quality_score} / TGE ${a.tge_score} / 行动 ${a.action_score}，置信度 ${a.confidence}`
+  })
+
+  await step(results, '评分', '质量分与 TGE 分分离：已 TGE 的项目没有 TGE 分', async () => {
+    const cfg = await scoring.loadScoreConfig()
+    const pre = scoring.scoreFacts(scoreFixture({ project: { id: 0, name: 'A', stage: 'pending_verify', tge_status: 'pre' } }), scoreExtras(), cfg)
+    const post = scoring.scoreFacts(scoreFixture({ project: { id: 0, name: 'B', stage: 'listed_watch', tge_status: 'post' }, listingLevel: 'confirmed' }), scoreExtras(), cfg)
+    assert(pre.tge_score != null, 'TGE 前项目应有 TGE 分')
+    assert(post.tge_score === null, `已 TGE 项目不应有 TGE 分：${post.tge_score}`)
+    assert(post.quality_score > 0, '已 TGE 项目仍应有质量分（用于回测）')
+    return `TGE 前 ${pre.tge_score} 分；已 TGE → TGE 分为 null，质量分 ${post.quality_score} 保留`
+  })
+
+  await step(results, '评分', '市场推断上市会打折；仅名称线索不给行动建议', async () => {
+    const cfg = await scoring.loadScoreConfig()
+    const confirmed = scoring.scoreFacts(scoreFixture({ listingLevel: 'confirmed' }), scoreExtras(), cfg)
+    const inferred = scoring.scoreFacts(scoreFixture({ listingLevel: 'market_inferred' }), scoreExtras(), cfg)
+    assert(inferred.quality_score < confirmed.quality_score, 'market_inferred 没有打折')
+    assert(inferred.flags.some((f) => f.code === 'market_inferred'), '缺少 market_inferred 红旗')
+    const lead = scoring.scoreFacts(scoreFixture({ lead: true, identity: 'name_only', productLevel: null }), scoreExtras({ hasContract: false }), cfg)
+    assert(lead.action_score === null, '线索不应有行动分')
+    assert(lead.recommendation === 'lead_only', `线索建议应为 lead_only，实际 ${lead.recommendation}`)
+    assert(lead.flags.some((f) => f.code === 'lead'), '缺少线索红旗')
+    return `market_inferred ${inferred.quality_score} < 已确认 ${confirmed.quality_score}；线索行动分 null`
+  })
+
+  await step(results, '评分', '覆盖率折扣只作用于行动分；Robinhood 行动分受上限约束', async () => {
+    const cfg = await scoring.loadScoreConfig()
+    const eth = scoring.scoreFacts(scoreFixture(), scoreExtras(), cfg)
+    const sol = scoring.scoreFacts(scoreFixture({ chains: ['solana'] }), scoreExtras(), cfg)
+    assert(eth.quality_score === sol.quality_score, '链覆盖折扣不应改变质量分')
+    assert(sol.action_score < eth.action_score, 'SOL 行动分应低于同等 ETH 项目')
+    const rh = scoring.scoreFacts(scoreFixture({
+      chains: ['robinhood'], listingLevel: 'none',
+      metrics: { twitter_followers: 2e6, tvl_usd: 500e6 },
+      completeness: { name: true, domain: true, twitter: true, surf_id: true, contract: true, chains: true, tge: true, funding: true, token_data: true },
+      origins: {
+        credible_funding: new Set(['surf_fundraising']), verifiable_product: new Set(['onchain']),
+        multi_source: new Set(['multi']), social_traction: new Set(['surf_project']),
+      },
+    }), scoreExtras({ maxFundingUsd: 80e6, fundingRounds: 3, listingEvents: 2 }), cfg)
+    assert(rh.quality_score >= 80, `Robinhood 样例质量分不够高（${rh.quality_score}），无法验证上限`)
+    assert(rh.action_score != null && rh.action_score <= cfg.robinhood_action_cap, `Robinhood 行动分 ${rh.action_score} 超过上限 ${cfg.robinhood_action_cap}`)
+    assert(rh.flags.some((f) => f.code === 'robinhood_review'), '缺少 Robinhood 人工复核红旗')
+    return `ETH 行动 ${eth.action_score} > SOL ${sol.action_score}；Robinhood ${rh.action_score} ≤ ${cfg.robinhood_action_cap}`
+  })
+
+  await step(results, '评分', '置信度随身份 / 证据 / 时效变化', async () => {
+    const cfg = await scoring.loadScoreConfig()
+    const good = scoring.scoreFacts(scoreFixture(), scoreExtras(), cfg)
+    const nameOnly = scoring.scoreFacts(scoreFixture({ identity: 'name_only', origins: {} }), scoreExtras(), cfg)
+    const stale = scoring.scoreFacts(scoreFixture({ dataAsOf: new Date(Date.now() - 120 * 86400000).toISOString() }), scoreExtras(), cfg)
+    assert(nameOnly.confidence < good.confidence, '仅名称线索的置信度没有降低')
+    assert(stale.confidence < good.confidence, '过期数据置信度没有降低')
+    assert(stale.flags.some((f) => f.code === 'stale_data'), '缺少数据过期红旗')
+    return `完整 ${good.confidence} > 仅名称 ${nameOnly.confidence}；过期 ${stale.confidence}`
+  })
+
+  await step(results, '评分', '评分历史：结果不变不追加，口径变化生成新版本快照', async () => {
+    const target = await db.one(
+      `SELECT id, name FROM wr_projects WHERE merged_into IS NULL AND score_version IS NOT NULL ORDER BY quality_score DESC NULLS LAST LIMIT 1`)
+    assert(target, '没有可评分的真实项目')
+    const r1 = await scoring.scoreProjects([target.id], { snapshotType: 'manual_recalculate' })
+    const r2 = await scoring.scoreProjects([target.id], { snapshotType: 'manual_recalculate' })
+    assert(r2.snapshots === 0, `结果未变仍追加了 ${r2.snapshots} 条快照`)
+    const row = await db.one(
+      `SELECT score_version, scoring_rule_version, quality_score::float q, dims, flags, reasons, config_hash, snapshot_type
+       FROM wr_scores WHERE project_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1`, [target.id])
+    assert(row.score_version === scoring.SCORE_VERSION && row.scoring_rule_version === scoring.SCORING_RULE_VERSION, '版本号未写入')
+    assert(row.dims && Object.keys(row.dims).length === 6, '维度没有落库')
+    assert(Array.isArray(row.flags) && Array.isArray(row.reasons) && row.config_hash, '红旗 / 理由 / 口径指纹缺失')
+    assert(row.snapshot_type === 'manual_recalculate', `快照类型错误：${row.snapshot_type}`)
+    return `${target.name}：第二次评分 0 条新快照；版本 ${row.score_version}，口径指纹 ${row.config_hash}`
+  })
+
+  await step(results, '评分', '三个真实项目验收框架（ETH / SOL / Robinhood 各一个）', async () => {
+    const pick = async (chain) => db.one(
+      `SELECT id, name, chains, stage, quality_score::float q, tge_score::float t, action_score::float a, score_grade g
+       FROM wr_projects WHERE merged_into IS NULL AND chains ? $1 AND score_version IS NOT NULL
+       ORDER BY (stage IN ('screening','pending_verify','data_incomplete','discovered')) DESC,
+                quality_score DESC NULLS LAST LIMIT 1`, [chain])
+    const picks = []
+    for (const chain of ['ethereum', 'solana', 'robinhood']) {
+      const p = await pick(chain)
+      if (!p) { picks.push(`${chain}：暂无项目（等待采集）`); continue }
+      for (const k of ['q', 't', 'a']) assert(p[k] == null || (p[k] >= 0 && p[k] <= 100), `${p.name} 的 ${k} 越界`)
+      assert(p.g, `${p.name} 没有等级`)
+      picks.push(`${p.name}（${chain}）质量 ${p.q} / TGE ${p.t ?? '—'} / 行动 ${p.a ?? '—'}，${p.g}`)
+    }
+    const rows = await db.one(`SELECT count(*)::int c FROM wr_scores`)
+    assert(rows.c > 0, '评分历史表为空')
+    return `${picks.join('；')}。口径未锁定，阈值待真实数据观察 1–2 天后确定`
+  })
+}
+
+module.exports = { runSelftest, _internal: { scoringTests } }
