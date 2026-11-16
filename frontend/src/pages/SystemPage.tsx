@@ -55,6 +55,7 @@ interface ScoreOverview {
   action_confirmed_chain?: number; action_inferred_chain?: number; action_no_chain?: number
   action_leads?: number; action_market_inferred?: number
   robinhood_scored?: number; robinhood_max_action?: number | null
+  needs_chain?: number; needs_chain_q50?: number
 }
 interface EndpointStat { provider: string; endpoint: string; calls: number; cached: number; ok: number; errors: number; est_credits: number; actual_credits: number }
 interface RelProject { id: number; name: string; symbol?: string | null; website_domain?: string | null; twitter_handle?: string | null; chains?: string[] | null }
@@ -442,6 +443,7 @@ function ScoreSettings({ setting, overview }: { setting: ScoreConfig; overview?:
           <span>有行动分 {overview.actionable} 个</span>
           <span title="行动分项目的链状态分布">已确认链 {overview.action_confirmed_chain ?? 0} · 推断链 {overview.action_inferred_chain ?? 0} · 无链 {overview.action_no_chain ?? 0}</span>
           <span title="必须为 0">线索 / 市场推断有行动分：{overview.action_leads ?? 0} / {overview.action_market_inferred ?? 0}</span>
+          <span title="链未确认、因此没有行动分的有效项目；确认链后才进入行动池">待确认链 {overview.needs_chain ?? 0}（质量分 ≥ 50：{overview.needs_chain_q50 ?? 0}）</span>
           <span title="Robinhood 行动分上限 60">Robinhood 最高行动分 {overview.robinhood_max_action ?? '—'}</span>
           <span className="text-fg-subtle">最近评分 {overview.last_scored_at ? fmtTime(overview.last_scored_at) : '—'}</span>
         </div>

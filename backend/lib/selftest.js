@@ -799,6 +799,20 @@ async function scoringTests(results) {
     return `只有 token_plan → 覆盖 ${r.data_coverage}（缺融资）；有公募 / 融资 → 覆盖 1.0`
   })
 
+  await step(results, '评分', '链未确认的项目显示「待确认链」，设阈值后也不能凭质量分进入深研 / 观察', async () => {
+    const cfg = await scoring.loadScoreConfig()
+    const noChain = scoreFixture({ chainStatus: 'none', chains: [] })
+    const r = scoring.scoreFacts(noChain, scoreExtras(), cfg)
+    assert(r.action_score === null, `链未确认不应有行动分，实际 ${r.action_score}`)
+    assert(r.recommendation === 'needs_chain', `建议应为 needs_chain，实际 ${r.recommendation}`)
+    const withTh = { ...cfg, thresholds: { deep_research: 1, watch: 1 } }
+    const r2 = scoring.scoreFacts(noChain, scoreExtras(), withTh)
+    assert(r2.recommendation === 'needs_chain', `设阈值后仍应为 needs_chain，实际 ${r2.recommendation}`)
+    const ok = scoring.scoreFacts(scoreFixture(), scoreExtras(), withTh)
+    assert(ok.action_score != null && ok.recommendation === 'deep_research', `有链项目应按行动分判断，实际 ${ok.recommendation}`)
+    return `质量 ${r.quality_score} 但链未确认 → 待确认链；有链项目按行动分 ${ok.action_score} 判断`
+  })
+
   await step(results, '评分', '数据时效取关键维度最老的数据，不被新事件拉高', async () => {
     const cfg = await scoring.loadScoreConfig()
     const old = new Date(Date.now() - 120 * 86400000).toISOString()

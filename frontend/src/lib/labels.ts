@@ -69,6 +69,7 @@ export const SCORE_RECOMMENDATION_LABEL: Record<string, { text: string; cls: str
   watch: { text: '纳入观察', cls: 'text-fg-base' },
   skip: { text: '暂不跟进', cls: 'text-fg-muted' },
   insufficient_data: { text: '数据不足', cls: 'text-[var(--color-tag-yellow-100)]' },
+  needs_chain: { text: '待确认链', cls: 'text-[var(--color-tag-yellow-100)]' },
   lead_only: { text: '线索（不做决策）', cls: 'text-[var(--color-tag-orange-100)]' },
   inactive: { text: '已休眠 / 归档', cls: 'text-fg-muted' },
   out_of_scope: { text: '不在早期池', cls: 'text-fg-muted' },

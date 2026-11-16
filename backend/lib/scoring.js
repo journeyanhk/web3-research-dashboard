@@ -54,6 +54,7 @@ const RECOMMENDATION_LABEL = {
   watch: '纳入观察',
   skip: '暂不跟进',
   insufficient_data: '数据不足',
+  needs_chain: '待确认链',
   lead_only: '线索（不评分决策）',
   inactive: '已休眠 / 归档',
   out_of_scope: '不在早期池',
@@ -282,8 +283,10 @@ function scoreFacts(f, extras = {}, cfg = DEFAULT_SCORE_CONFIG) {
   else if (inactive) recommendation = 'inactive'
   else if (outOfScope) recommendation = 'out_of_scope'
   else if (confidence < num(cfg.min_confidence)) recommendation = 'insufficient_data'
-  else if (cfg.thresholds?.deep_research != null || cfg.thresholds?.watch != null) {
-    const q = actionScore ?? quality
+  // 链未确认：不给行动分，也不能凭质量分绕过行动门槛直接进入「深研 / 观察」
+  else if (f.chainStatus === 'none') recommendation = 'needs_chain'
+  else if (actionScore != null && (cfg.thresholds?.deep_research != null || cfg.thresholds?.watch != null)) {
+    const q = actionScore
     recommendation = cfg.thresholds.deep_research != null && q >= num(cfg.thresholds.deep_research) ? 'deep_research'
       : cfg.thresholds.watch != null && q >= num(cfg.thresholds.watch) ? 'watch'
         : 'skip'
@@ -430,6 +433,10 @@ async function scoreOverview() {
             count(*) FILTER (WHERE action_score IS NOT NULL AND listing_evidence_level = 'market_inferred')::int AS action_market_inferred,
             count(*) FILTER (WHERE chains ? 'robinhood')::int AS robinhood_scored,
             max(action_score) FILTER (WHERE chains ? 'robinhood')::float AS robinhood_max_action,
+            count(*) FILTER (WHERE action_score IS NULL AND COALESCE(chain_status,'none') = 'none' AND COALESCE(screening_facts->>'lead','false') <> 'true'
+                             AND stage NOT IN ('listed_watch','non_early','opportunity_chain','dormant','archived'))::int AS needs_chain,
+            count(*) FILTER (WHERE action_score IS NULL AND COALESCE(chain_status,'none') = 'none' AND COALESCE(screening_facts->>'lead','false') <> 'true'
+                             AND stage NOT IN ('listed_watch','non_early','opportunity_chain','dormant','archived') AND quality_score >= 50)::int AS needs_chain_q50,
             max(scored_at) AS last_scored_at
      FROM wr_projects WHERE merged_into IS NULL AND score_version IS NOT NULL`)
   return rows[0] || {}
