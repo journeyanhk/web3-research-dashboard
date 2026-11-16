@@ -7,7 +7,7 @@ const registry = require('./registry')
 const pipeline = require('./pipeline')
 
 const SCORE_VERSION = 'm3.0-draft'
-const SCORING_RULE_VERSION = 'm3-scoring-0'
+const SCORING_RULE_VERSION = 'm3-scoring-1' // 1：链未确认 → 待确认链；阈值只比行动分；项目动态按发生时间计动能
 const SCORE_CONFIG_KEY = 'score_config'
 const SCORE_SNAPSHOT_TYPES = pipeline.SNAPSHOT_TYPES
 
@@ -125,6 +125,8 @@ function applyConfigChange(oldCfg, nextCfg) {
     const missing = ['deep_research', 'watch'].filter((k) => next.thresholds?.[k] == null)
     if (missing.length) throw new Error(`锁定时需要填写阈值：${missing.map((k) => (k === 'deep_research' ? '建议深研' : '纳入观察')).join('、')}。`)
     next.locked_at = new Date().toISOString()
+    // 锁定即正式口径：版本去掉 -draft（m3.0-draft → m3.0），此后解锁再改会变成 m3.0.r2、r3…
+    next.version = String(next.version || SCORE_VERSION).replace(/-draft$/, '')
   }
   return { next, changed }
 }
@@ -333,7 +335,7 @@ function scoreFacts(f, extras = {}, cfg = DEFAULT_SCORE_CONFIG) {
 async function loadExtras(ids) {
   if (!ids.length) return {}
   const events = await db.query(
-    `SELECT project_id, event_type, link_confidence, importance, data, created_at, excluded_reason
+    `SELECT project_id, event_type, endpoint, link_confidence, importance, data, created_at, event_at, excluded_reason
      FROM wr_events WHERE project_id = ANY($1)`, [ids])
   const idsRows = await db.query(
     `SELECT project_id, bool_or(id_type = 'contract') AS has_contract FROM wr_project_ids WHERE project_id = ANY($1) GROUP BY 1`, [ids])
@@ -343,8 +345,10 @@ async function loadExtras(ids) {
   for (const e of events) {
     const x = out[e.project_id]
     if (!x || e.excluded_reason) continue
-    const t = new Date(e.created_at).getTime()
-    if (!x.lastEventAt || t > new Date(x.lastEventAt).getTime()) x.lastEventAt = e.created_at
+    // 主动回查得到的项目动态按事件发生时间计（不晚于观察时间），其余事件按观察时间
+    const seenAt = new Date(e.created_at).getTime()
+    const t = e.endpoint === 'search/events' && e.event_at ? Math.min(new Date(e.event_at).getTime(), seenAt) : seenAt
+    if (!x.lastEventAt || t > new Date(x.lastEventAt).getTime()) x.lastEventAt = new Date(t).toISOString()
     if (t >= Date.now() - 30 * 86400000) x.recentEvents += 1
     if (e.event_type === 'airdrop') x.airdropTask = true
     const trusted = ['high', 'medium'].includes(e.link_confidence || 'medium')
@@ -381,7 +385,7 @@ async function scoreProjects(ids = null, { snapshotType = 'historical_runtime' }
     const chunk = targetIds.slice(i, i + 200)
     const [facts, extras] = await Promise.all([pipeline.gatherFacts(chunk), loadExtras(chunk)])
     const lastRows = await db.query(
-      `SELECT DISTINCT ON (project_id) project_id, facts_hash, config_hash, score_version
+      `SELECT DISTINCT ON (project_id) project_id, facts_hash, config_hash, score_version, scoring_rule_version
        FROM wr_scores WHERE project_id = ANY($1) ORDER BY project_id, created_at DESC, id DESC`, [chunk])
     const last = Object.fromEntries(lastRows.map((r) => [r.project_id, r]))
     for (const f of facts) {
@@ -397,7 +401,8 @@ async function scoreProjects(ids = null, { snapshotType = 'historical_runtime' }
           result.confidence, version],
       )
       const prev = last[p.id]
-      if (prev && prev.facts_hash === hash && prev.config_hash === cfgHash && prev.score_version === version) continue
+      if (prev && prev.facts_hash === hash && prev.config_hash === cfgHash && prev.score_version === version
+        && prev.scoring_rule_version === SCORING_RULE_VERSION) continue
       await db.query(
         `INSERT INTO wr_scores (project_id, score_version, scoring_rule_version, quality_score, tge_score, action_score,
            grade, confidence, coverage, data_coverage, chain_factor, freshness_days, recommendation, dims, tge_dims, flags, reasons,

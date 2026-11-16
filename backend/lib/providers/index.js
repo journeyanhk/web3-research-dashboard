@@ -48,13 +48,16 @@ async function saveRaw({ provider, endpoint, hash, params, status, httpStatus, b
 }
 
 /**
- * call({ provider, endpoint, params, method, trigger, task, priority, projectId, cacheTtlSec, estCost })
+ * call({ provider, endpoint, params, method, trigger, task, priority, projectId, cacheTtlSec, estCost, maintenance })
+ * maintenance = true：例行维护（休眠前回查、详情定期刷新）。仍受月预算和每日自动上限约束，
+ *   账本照常记到项目上，但不计入、也不受「单项目全程累计上限」限制——该上限衡量的是研究深度，
+ *   否则每个项目一两个月后就会因例行维护触顶，之后再也无法维护。
  * 返回 { body, rawId, cached, credits, provider }
  */
 async function call(opts) {
   const {
     provider, endpoint, params = {}, method = 'GET', trigger = 'auto', task, priority = 'normal',
-    projectId, cacheTtlSec = 0,
+    projectId, cacheTtlSec = 0, maintenance = false,
   } = opts
   const adapter = ADAPTERS[provider]
   if (!adapter) throw new Error(`未知数据源：${provider}`)
@@ -78,7 +81,7 @@ async function call(opts) {
 
   // 2. 预算检查（预估成本：已知接口查成本表，未知接口用保守值）
   const estCost = opts.estCost ?? adapter.estimate({ endpoint, params, costTable: prov?.cost_table })
-  const verdict = await budget.check({ provider, trigger, priority, projectId, estCost })
+  const verdict = await budget.check({ provider, trigger, priority, projectId: maintenance ? null : projectId, estCost })
   if (!verdict.allowed) {
     await logUsage({ ...base, status: 'blocked', credits: 0, estCost, error: verdict.reason })
     throw new BudgetBlockedError(verdict.reason, verdict.scope || 'global')
@@ -94,7 +97,7 @@ async function call(opts) {
     })
     const rawId = await saveRaw({ provider, endpoint, hash, params, status: 'ok', httpStatus: result.status, body: result.body })
     await logUsage({ ...base, status: 'ok', httpStatus: result.status, credits: result.credits, estCost, durationMs: Date.now() - started, attempts, rateLimited, rawId })
-    if (projectId && result.credits > 0) {
+    if (projectId && !maintenance && result.credits > 0) {
       await db.query('UPDATE wr_projects SET credits_spent = credits_spent + $1, updated_at = now() WHERE id = $2', [result.credits, projectId])
     }
     await registry.patch('provider', provider, { last_success_at: new Date().toISOString() })

@@ -73,6 +73,7 @@ interface Project {
   campaign_chains?: string[] | null
   last_signal_at?: string | null
   reactivated_at?: string | null
+  activity_checked_at?: string | null
   tags?: string[] | null
   flags?: string[] | null
 }
@@ -566,6 +567,7 @@ export default function ProjectDetailPage({ id }: { id: number }) {
           <span>已用 {fmtNum(Number(p.credits_spent), 1)} 点</span>
           <span>最近有效信号 {fmtAgo(p.last_signal_at)}</span>
           {p.reactivated_at && <span>重新激活于 {fmtTime(p.reactivated_at)}</span>}
+          {p.activity_checked_at && <span title="休眠前主动回查 Surf 项目事件的时间（同一项目 14 天内不重复查）">最近回查 {fmtAgo(p.activity_checked_at)}</span>}
           <span title={FRESHNESS_LABEL[p.freshness ?? 'expired']?.tip}>
             数据<span className={FRESHNESS_LABEL[p.freshness ?? 'expired']?.cls}>{FRESHNESS_LABEL[p.freshness ?? 'expired']?.text}</span>
             （事件 {fmtAgo(p.last_event_at)} · 详情 {fmtAgo(p.last_detail_at)} · 指标 {fmtAgo(p.last_metric_at)}）

@@ -110,6 +110,9 @@ router.put('/settings/:key', wrap(async (req, res) => {
       const t = next.thresholds?.[k]
       if (t != null && !(Number(t) >= 0 && Number(t) <= 100)) return res.status(400).json({ error: `阈值 ${k} 需在 0–100 之间或留空` })
     }
+    if (next.thresholds?.deep_research != null && next.thresholds?.watch != null && !(Number(next.thresholds.deep_research) > Number(next.thresholds.watch))) {
+      return res.status(400).json({ error: '「建议深研」阈值需高于「纳入观察」阈值' })
+    }
     try {
       const { next: saved } = scoring.applyConfigChange(old, next)
       await registry.set('setting', key, saved)

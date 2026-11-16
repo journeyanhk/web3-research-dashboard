@@ -439,7 +439,7 @@ function decideStage(f, cfg = DEFAULT_PIPELINE_CONFIG) {
   } else if (DORMANCY_STAGES.has(stage) && idle != null) {
     if (idle >= cfg.archive_days) {
       stage = 'archived'
-      reason = `${idle} 天没有新的有效信号（最近：${fmtDate(f.lastSignalAt)}），暂时归档；出现融资、TGE、上币、空投或详情等新信号时自动恢复。原阶段：${STAGE_LABEL_MAP[wouldBe]}`
+      reason = `${idle} 天没有新的有效信号（最近：${fmtDate(f.lastSignalAt)}），暂时归档；出现融资、TGE、上币、空投、项目动态等新信号时自动恢复。原阶段：${STAGE_LABEL_MAP[wouldBe]}`
     } else if (idle >= cfg.dormant_days) {
       stage = 'dormant'
       reason = `${idle} 天没有新的有效信号（最近：${fmtDate(f.lastSignalAt)}），进入休眠；${cfg.archive_days} 天仍无信号将归档。原阶段：${STAGE_LABEL_MAP[wouldBe]}`
@@ -628,6 +628,6 @@ async function confirmChains(projectId, chains, note) {
 module.exports = {
   STAGES, AUTO_STAGES, DORMANCY_STAGES, COMPLETENESS_ITEMS, HARD_LABEL, BONUS_LABEL, RULE_VERSION, SCREENING_RULE_VERSION,
   GROUP_LABEL, MATURITY_LABEL, CHAIN_STATUS_LABEL, CHAIN_SOURCE_LABEL, LISTING_EVIDENCE_LABEL, CONFIRMED_CHAIN_SOURCES, SNAPSHOT_TYPES,
-  DEFAULT_PIPELINE_CONFIG, CORE_CHAINS, coverageFor, factsHash, listingLevelOf,
+  DEFAULT_PIPELINE_CONFIG, CORE_CHAINS, loadPipelineConfig, coverageFor, factsHash, listingLevelOf,
   evaluateProjects, setStageManual, restoreAuto, decideStage, signalLabel, chainStatusOf, maturityOf, confirmChains, gatherFacts,
 }

@@ -181,7 +181,7 @@ export default function ProjectsPage() {
         />
         <Select label="链" value={chain} onChange={reset(setChain)} options={[['', '全部'], ...CHAINS.map((c) => [c.id, c.label] as [string, string])]} />
         <Select label="来源" value={source} onChange={reset(setSource)}
-          options={[['', '全部'], ['fundraising', '融资'], ['public_sale', '公募'], ['airdrop', '空投'], ['listing', '上币'], ['tge', 'TGE'], ['news', '新闻']]} />
+          options={[['', '全部'], ['fundraising', '融资'], ['public_sale', '公募'], ['airdrop', '空投'], ['listing', '上币'], ['tge', 'TGE'], ['news', '新闻'], ['activity', '项目动态']]} />
         <Select label="身份" value={identity} onChange={reset(setIdentity)}
           options={[['', '全部'], ['confirmed', '已确认'], ['partial', '部分确认'], ['name_only', '仅名称']]} />
         <Select label="信号" value={signal} onChange={reset(setSignal)}

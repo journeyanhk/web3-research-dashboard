@@ -80,7 +80,7 @@ async function runSelftest() {
     assert(/^\.env\.\*$/m.test(gi) && /^\.env$/m.test(gi), '.gitignore 未排除 .env / .env.*')
     let tracked = []
     try {
-      tracked = execSync('git ls-files', { cwd: ROOT, encoding: 'utf8' }).split('\n')
+      tracked = execSync(`git -c safe.directory=${ROOT} ls-files`, { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).split('\n')
         .filter((f) => (/(^|\/)\.env/.test(f) && !/\.env\.example$/.test(f)) || (/^backend\/secrets\//.test(f) && !/README\.md$/.test(f)) || /^outputs\//.test(f))
     } catch (e) {
       throw new Error(`无法读取 Git 跟踪文件：${e.message.slice(0, 120)}`)
@@ -246,6 +246,7 @@ async function runSelftest() {
 
   // ───── 评分（M3 框架）─────
   await scoringTests(results)
+  await maintenanceTests(results)
 
   const summary = {
     ran_at: new Date().toISOString(),
@@ -666,15 +667,21 @@ const scoreExtras = (over = {}) => ({
 async function scoringTests(results) {
   const scoring = require('./scoring')
 
-  await step(results, '评分', '评分口径可配置且权重合计为 1（当前为草案，未锁定）', async () => {
+  await step(results, '评分', '评分口径权重合计为 1；锁定状态与阈值一致', async () => {
     const cfg = await scoring.loadScoreConfig()
     const q = Object.values(cfg.quality_weights).reduce((a, b) => a + Number(b), 0)
     const t = Object.values(cfg.tge_weights).reduce((a, b) => a + Number(b), 0)
     assert(Math.abs(q - 1) <= 0.001, `质量分权重合计 ${q}`)
     assert(Math.abs(t - 1) <= 0.001, `TGE 分权重合计 ${t}`)
-    assert(cfg.locked === false, '当前不应锁定口径')
-    assert(cfg.thresholds.deep_research == null && cfg.thresholds.watch == null, '阈值应保持未锁定')
-    return `${scoring.SCORE_VERSION}，质量分 / TGE 分权重均合计 1，阈值未锁定`
+    if (cfg.locked) {
+      assert(cfg.thresholds.deep_research != null && cfg.thresholds.watch != null, '已锁定但阈值不完整')
+      assert(Number(cfg.thresholds.deep_research) > Number(cfg.thresholds.watch), '深研阈值应高于观察阈值')
+      assert(cfg.locked_at, '已锁定但没有锁定时间')
+      assert(!/-draft/.test(scoring.versionOf(cfg)), `已锁定但版本仍是草案：${scoring.versionOf(cfg)}`)
+      return `${scoring.versionOf(cfg)} 已锁定（${String(cfg.locked_at).slice(0, 10)}），深研 ≥ ${cfg.thresholds.deep_research}、观察 ≥ ${cfg.thresholds.watch}`
+    }
+    assert(cfg.thresholds.deep_research == null && cfg.thresholds.watch == null, '未锁定时阈值应为空')
+    return `${scoring.versionOf(cfg)}，质量分 / TGE 分权重均合计 1，口径未锁定`
   })
 
   await step(results, '评分', '同一事实两次评分结果一致，分数都在 0–100', async () => {
@@ -837,13 +844,18 @@ async function scoringTests(results) {
       scoring.applyConfigChange({ ...scoring.DEFAULT_SCORE_CONFIG }, { ...scoring.DEFAULT_SCORE_CONFIG, locked: true })
     } catch (e) { lockBlocked = e.message }
     assert(lockBlocked && /阈值/.test(lockBlocked), '没有阈值也能锁定')
-    return '锁定时拒绝修改并以「最低置信度」提示；解锁留痕、版本 1→2；无阈值不能锁定'
+    const draft = { ...scoring.DEFAULT_SCORE_CONFIG, thresholds: { deep_research: 60, watch: 40 } }
+    const { next: locked } = scoring.applyConfigChange({ ...scoring.DEFAULT_SCORE_CONFIG }, { ...draft, locked: true })
+    assert(locked.locked_at && scoring.versionOf(locked) === 'm3.0', `锁定后版本应为 m3.0，实际 ${scoring.versionOf(locked)}`)
+    assert(scoring.versionOf(scoring.applyUnlock(locked, '自检：解锁')) === 'm3.0.r2', '锁定后解锁版本应为 m3.0.r2')
+    return '锁定时拒绝修改并以「最低置信度」提示；解锁留痕、版本 1→2；无阈值不能锁定；锁定后版本 m3.0，解锁为 m3.0.r2'
   })
 
   await step(results, '评分', '三个真实项目验收框架（ETH / SOL / Robinhood 各一个）', async () => {
     const pick = async (chain) => db.one(
-      `SELECT id, name, chains, stage, quality_score::float q, tge_score::float t, action_score::float a, score_grade g
-       FROM wr_projects WHERE merged_into IS NULL AND chains ? $1 AND score_version IS NOT NULL
+      `SELECT id, name, chains, stage, quality_score::float q, tge_score::float t, action_score::float a, score_grade g,
+              (SELECT recommendation FROM wr_scores s WHERE s.project_id = p.id ORDER BY id DESC LIMIT 1) AS rec
+       FROM wr_projects p WHERE merged_into IS NULL AND chains ? $1 AND score_version IS NOT NULL
        ORDER BY (stage IN ('screening','pending_verify','data_incomplete','discovered')) DESC,
                 quality_score DESC NULLS LAST LIMIT 1`, [chain])
     const picks = []
@@ -852,12 +864,92 @@ async function scoringTests(results) {
       if (!p) { picks.push(`${chain}：暂无项目（等待采集）`); continue }
       for (const k of ['q', 't', 'a']) assert(p[k] == null || (p[k] >= 0 && p[k] <= 100), `${p.name} 的 ${k} 越界`)
       assert(p.g, `${p.name} 没有等级`)
-      picks.push(`${p.name}（${chain}）质量 ${p.q} / TGE ${p.t ?? '—'} / 行动 ${p.a ?? '—'}，${p.g}`)
+      picks.push(`${p.name}（${chain}）质量 ${p.q} / TGE ${p.t ?? '—'} / 行动 ${p.a ?? '—'}，${p.g}，${scoring.RECOMMENDATION_LABEL[p.rec] || p.rec || '—'}`)
     }
     const rows = await db.one(`SELECT count(*)::int c FROM wr_scores`)
     assert(rows.c > 0, '评分历史表为空')
-    return `${picks.join('；')}。口径未锁定，阈值待真实数据观察 1–2 天后确定`
+    const cfg = await scoring.loadScoreConfig()
+    return `${picks.join('；')}。${cfg.locked ? `口径已锁定（${scoring.versionOf(cfg)}）` : '口径未锁定'}`
   })
 }
 
-module.exports = { runSelftest, _internal: { scoringTests } }
+// M3.2：休眠前主动回查 + 详情定期刷新（不花点数：只验证候选、信号时间、预算规则）
+async function maintenanceTests(results) {
+  const { _internal: D } = require('./collect/discovery')
+  const budget = require('./budget')
+  const pipeline = require('./pipeline')
+  const tag = `wrmt${Date.now()}`
+  const tmp = []
+  try {
+    const r = await db.one(
+      `INSERT INTO wr_projects (name, discovery_source, surf_project_id, stage, identity_status, first_seen_at, last_signal_at, detail_fetched_at)
+       VALUES ($1, 'selftest_tmp', $2, 'pending_verify', 'confirmed', now() - interval '25 days', now() - interval '25 days', now() - interval '31 days')
+       RETURNING id`, [`WR自检回查${tag}`, `${tag}-surf`])
+    const pid = r.id
+    tmp.push(pid)
+
+    await step(results, '维护', '休眠前回查：18 天无信号的已确认项目进入候选，14 天内回查过的不再查', async () => {
+      const ids = (await D.activityCandidates(1000, 18, 14)).map((x) => x.id)
+      assert(ids.includes(pid), '25 天无信号的项目不在回查候选里')
+      await db.query(`UPDATE wr_projects SET activity_checked_at = now() - interval '3 days' WHERE id = $1`, [pid])
+      const ids2 = (await D.activityCandidates(1000, 18, 14)).map((x) => x.id)
+      assert(!ids2.includes(pid), '14 天内回查过仍在候选里')
+      await db.query(`UPDATE wr_projects SET activity_checked_at = NULL, stage = 'screening' WHERE id = $1`, [pid])
+      const ids3 = (await D.activityCandidates(1000, 18, 14)).map((x) => x.id)
+      assert(!ids3.includes(pid), '初筛不会自动休眠，不应回查')
+      await db.query(`UPDATE wr_projects SET stage = 'pending_verify' WHERE id = $1`, [pid])
+      return '无信号 25 天 → 候选；3 天前查过 → 跳过；初筛阶段 → 跳过'
+    })
+
+    await step(results, '维护', '项目动态按发生时间算信号：旧事件不会让项目「变新」，近期动态能阻止休眠', async () => {
+      const old = await D.insertEvent({ type: 'activity', externalId: `${tag}-old`, endpoint: 'search/events', projectId: pid,
+        title: 'selftest old', linkMethod: 'surf_id', linkConfidence: 'high', eventAt: new Date(Date.now() - 40 * 86400000).toISOString() })
+      assert(old, '写入项目动态失败')
+      await D.refreshSignals()
+      const a = await db.one(`SELECT EXTRACT(EPOCH FROM now() - last_signal_at) / 86400 AS d FROM wr_projects WHERE id = $1`, [pid])
+      assert(Number(a.d) > 24, `40 天前的动态把信号刷新成了 ${Number(a.d).toFixed(1)} 天前`)
+      await D.insertEvent({ type: 'activity', externalId: `${tag}-new`, endpoint: 'search/events', projectId: pid,
+        title: 'selftest new', linkMethod: 'surf_id', linkConfidence: 'high', eventAt: new Date(Date.now() - 3 * 86400000).toISOString() })
+      await D.refreshSignals()
+      const b = await db.one(`SELECT EXTRACT(EPOCH FROM now() - last_signal_at) / 86400 AS d FROM wr_projects WHERE id = $1`, [pid])
+      assert(Number(b.d) > 2.5 && Number(b.d) < 3.5, `3 天前的动态应让信号停在约 3 天前，实际 ${Number(b.d).toFixed(1)} 天`)
+      await pipeline.evaluateProjects([pid])
+      const st = await db.one('SELECT stage FROM wr_projects WHERE id = $1', [pid])
+      assert(!['dormant', 'archived'].includes(st.stage), `有近期动态仍被休眠：${st.stage}`)
+      assert(!require('./notify').EVENT_ALERT.activity, '项目动态不应触发站内提醒')
+      return `40 天前动态 → 仍约 ${Number(a.d).toFixed(0)} 天无信号；3 天前动态 → ${Number(b.d).toFixed(1)} 天，阶段「${st.stage}」；不触发提醒`
+    })
+
+    await step(results, '维护', '详情定期刷新：超过 30 天的非归档项目进入候选，归档 / Surf 查不到的不刷', async () => {
+      const ids = (await D.detailRefreshCandidates(1000, 30)).map((x) => x.id)
+      assert(ids.includes(pid), '详情 31 天前的项目不在刷新候选里')
+      await db.query(`UPDATE wr_projects SET stage = 'archived' WHERE id = $1`, [pid])
+      const ids2 = (await D.detailRefreshCandidates(1000, 30)).map((x) => x.id)
+      await db.query(`UPDATE wr_projects SET stage = 'pending_verify', detail_not_found_at = now() WHERE id = $1`, [pid])
+      const ids3 = (await D.detailRefreshCandidates(1000, 30)).map((x) => x.id)
+      assert(!ids2.includes(pid) && !ids3.includes(pid), '归档或 Surf 查不到的项目仍在刷新候选里')
+      return '31 天 → 候选；归档 → 跳过；Surf 查不到 → 跳过'
+    })
+
+    await step(results, '维护', '例行维护不受单项目累计上限限制，但仍受月预算 / 每日上限约束', async () => {
+      await db.query(`UPDATE wr_projects SET credits_spent = 3, coverage_level = 'discovery' WHERE id = $1`, [pid])
+      const capped = await budget.check({ provider: 'surf', trigger: 'auto', projectId: pid, estCost: 1, silent: true })
+      const maint = await budget.check({ provider: 'surf', trigger: 'auto', projectId: null, estCost: 1, silent: true })
+      assert(!capped.allowed && capped.scope === 'project', `已用 3 点的项目应被单项目上限拦截：${JSON.stringify(capped)}`)
+      const src = require('fs').readFileSync(require('path').join(__dirname, 'providers', 'index.js'), 'utf8')
+      assert(/projectId: maintenance \? null : projectId/.test(src) && /!maintenance && result\.credits/.test(src), '例行维护调用没有绕开单项目上限')
+      return `普通调用被单项目上限拦截；例行维护只看月 / 日预算（当前${maint.allowed ? '允许' : `拦截：${maint.reason}`}）`
+    })
+  } finally {
+    if (tmp.length) {
+      await db.query('DELETE FROM wr_stage_history WHERE project_id = ANY($1)', [tmp])
+      await db.query('DELETE FROM wr_screening_snapshots WHERE project_id = ANY($1)', [tmp])
+      await db.query('DELETE FROM wr_scores WHERE project_id = ANY($1)', [tmp])
+      await db.query('DELETE FROM wr_events WHERE external_id LIKE $1 OR project_id = ANY($2)', [`${tag}%`, tmp])
+      await db.query('DELETE FROM wr_alerts WHERE project_id = ANY($1)', [tmp])
+      await db.query('DELETE FROM wr_projects WHERE id = ANY($1)', [tmp])
+    }
+  }
+}
+
+module.exports = { runSelftest, _internal: { scoringTests, maintenanceTests } }

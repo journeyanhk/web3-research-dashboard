@@ -2,6 +2,7 @@
 //
 // 试跑期规模（可在配置 discovery_config 中调整）：融资 ≤50 条、空投 ≤50 条、新闻 ≤100 条、上币 ≤100 条，
 // 每次运行最多按名称查找 15 个项目身份、补全 10 个项目详情。
+const crypto = require('crypto')
 const db = require('../db')
 const registry = require('../registry')
 const { call, BudgetBlockedError } = require('../providers')
@@ -30,7 +31,18 @@ const DEFAULT_CONFIG = {
   detail_per_run: 10, // 每次运行最多补全项目详情的数量（1 点/个）
   research_cooldown_days: 7, // 同一项目按名称查找身份的冷却期
   identity_recheck_per_run: 5, // M2.3：每次运行最多为「仅名称」项目查一次 Surf 身份（从未查过，或查过后又出现新信号）
+  // M3.2 休眠前主动回查：已确认身份的早期项目 N 天没有新信号时，按项目查一次 Surf 项目事件（约 1 点 / 个）
+  activity_recheck_per_run: 10,
+  activity_recheck_idle_days: 18, // 比休眠线（21 天）提前 3 天回查
+  activity_recheck_cooldown_days: 14, // 同一项目两次回查至少间隔
+  // M3.2 详情定期刷新：非归档、有 Surf ID 的项目，详情超过 N 天重新拉一次（约 1 点 / 个），保持数据时效
+  detail_refresh_per_run: 5,
+  detail_refresh_days: 30,
 }
+
+// 回查时计入「项目动态」的 Surf 项目事件类型（按 Surf 项目 ID 精确关联，不是按名称搜新闻）
+const ACTIVITY_KINDS = new Set(['launch', 'upgrade', 'partnership', 'listing', 'airdrop', 'news', 'twitter'])
+const ACTIVITY_KIND_ZH = { launch: '上线', upgrade: '升级', partnership: '合作', listing: '上币', airdrop: '空投', news: '新闻', twitter: '推文' }
 
 const AIRDROP_STATUS_ZH = {
   POTENTIAL: '潜在', CONFIRMED: '已确认', SNAPSHOT: '已快照', VERIFICATION: '验证中', REWARD_AVAILABLE: '可领取', DISTRIBUTED: '已发放',
@@ -443,6 +455,18 @@ async function identityBackfill(ctx, limit = ctx.cfg.identity_recheck_per_run) {
 async function enrichDetails(ctx) {
   const st = (ctx.stats.detail = { candidates: 0, fetched: 0, merged: 0, tge_events: 0, errors: 0 })
   const rows = await detailCandidates(ctx.cfg.detail_per_run)
+  await fetchDetails(ctx, rows, st, { task: 'identity_detail', cacheTtlSec: 7 * 86400 })
+}
+
+// M3.2 详情定期刷新：保持 TVL / 关注数 / TGE 状态等数据时效，避免评分里的「数据超过时效」普遍出现
+async function refreshDetails(ctx) {
+  const st = (ctx.stats.detail_refresh = { candidates: 0, fetched: 0, merged: 0, tge_events: 0, errors: 0 })
+  if (!ctx.cfg.detail_refresh_per_run) return
+  const rows = await detailRefreshCandidates(ctx.cfg.detail_refresh_per_run, ctx.cfg.detail_refresh_days)
+  await fetchDetails(ctx, rows, st, { task: 'detail_refresh', cacheTtlSec: 86400, maintenance: true })
+}
+
+async function fetchDetails(ctx, rows, st, { task, cacheTtlSec, maintenance = false }) {
   st.candidates = rows.length
   for (const p of rows) {
     if (ctx.budgetBlocked) break
@@ -450,7 +474,7 @@ async function enrichDetails(ctx) {
     let rawId
     try {
       const r = await surf(ctx, 'project/detail', { id: p.surf_project_id },
-        { task: 'identity_detail', projectId: p.id, cacheTtlSec: 7 * 86400 })
+        { task, projectId: p.id, cacheTtlSec, maintenance, estCost: 1 })
       d = r.body?.data
       rawId = r.rawId
     } catch (e) {
@@ -530,6 +554,93 @@ async function detailCandidates(limit) {
   )
 }
 
+// 详情刷新候选：非归档、有 Surf ID、Surf 能查到详情，且详情超过 N 天；最旧的先刷
+async function detailRefreshCandidates(limit, days) {
+  return db.query(
+    `SELECT id, name, surf_project_id FROM wr_projects
+     WHERE merged_into IS NULL AND surf_project_id IS NOT NULL AND stage <> 'archived'
+       AND detail_fetched_at IS NOT NULL AND detail_not_found_at IS NULL
+       AND detail_fetched_at < now() - ($2 || ' days')::interval
+     ORDER BY detail_fetched_at ASC, id LIMIT $1`,
+    [limit, String(days)],
+  )
+}
+
+// ───────── M3.2 休眠前主动回查 ─────────
+// 候选：有 Surf ID、会被休眠规则处理的早期项目（待核实 / 数据不全 / 已休眠；初筛不会自动休眠），N 天没有新信号，且 14 天内没回查过。
+// 优先回查「快要休眠」的项目，其次是已休眠项目（按质量分）。线索（仅名称）没有 Surf ID，不在范围内。
+async function activityCandidates(limit, idleDays, cooldownDays) {
+  return db.query(
+    `SELECT id, name, surf_project_id, COALESCE(last_signal_at, first_seen_at) AS last_signal_at FROM wr_projects
+     WHERE merged_into IS NULL AND surf_project_id IS NOT NULL
+       AND stage IN ('discovered', 'pending_verify', 'data_incomplete', 'dormant')
+       AND COALESCE(last_signal_at, first_seen_at) < now() - ($2 || ' days')::interval
+       AND (activity_checked_at IS NULL OR activity_checked_at < now() - ($3 || ' days')::interval)
+     ORDER BY (stage = 'dormant'), quality_score DESC NULLS LAST, id LIMIT $1`,
+    [limit, String(idleDays), String(cooldownDays)],
+  )
+}
+
+/**
+ * 按 Surf 项目 ID 查一次项目事件（上线 / 升级 / 合作 / 上币 / 空投 / 新闻 / 推文）。
+ * - 只保存归档窗口（45 天）以内的事件，写成「项目动态」（activity），高置信关联
+ * - 信号时间按事件发生时间算（不是发现时间），所以查到的旧事件不会把项目「刷新」成活跃
+ * - 项目动态只用于判断是否休眠和动能，不算融资 / 上币证据，不触发站内提醒，也不能把线索升级为正式项目
+ */
+async function activityRecheck(ctx) {
+  const st = (ctx.stats.activity_recheck = { candidates: 0, checked: 0, events: 0, revived: 0, not_found: 0, errors: 0 })
+  const { cfg } = ctx
+  if (!cfg.activity_recheck_per_run) return
+  const pcfg = await require('../pipeline').loadPipelineConfig()
+  const windowDays = Number(pcfg.archive_days) || 45
+  const dormantDays = Number(pcfg.dormant_days) || 21
+  const rows = await activityCandidates(cfg.activity_recheck_per_run, cfg.activity_recheck_idle_days, cfg.activity_recheck_cooldown_days)
+  st.candidates = rows.length
+  for (const p of rows) {
+    if (ctx.budgetBlocked) break
+    let items
+    let rawId
+    try {
+      const r = await surf(ctx, 'search/events', { id: p.surf_project_id, limit: 20 },
+        { task: 'activity_recheck', projectId: p.id, cacheTtlSec: 86400, maintenance: true, estCost: 1 })
+      items = r.body?.data || []
+      rawId = r.rawId
+      st.checked++
+    } catch (e) {
+      if (e instanceof BudgetBlockedError) { if (e.scope === 'project') continue; break }
+      if (e.status === 404) {
+        await db.query('UPDATE wr_projects SET activity_checked_at = now() WHERE id = $1', [p.id])
+        st.not_found++
+        continue
+      }
+      st.errors++
+      continue
+    }
+    await db.query('UPDATE wr_projects SET activity_checked_at = now() WHERE id = $1', [p.id])
+    const prevSignal = new Date(p.last_signal_at).getTime()
+    let latest = null
+    for (const it of items) {
+      const kind = String(it?.type || '').toLowerCase()
+      if (!it?.title || !ACTIVITY_KINDS.has(kind)) continue
+      const at = Date.parse(it.date)
+      if (!Number.isFinite(at) || at < Date.now() - windowDays * 86400000) continue
+      const eventAt = new Date(Math.min(at, Date.now())).toISOString()
+      const key = crypto.createHash('sha1').update(`${kind}|${it.date}|${it.title}`).digest('hex').slice(0, 16)
+      const id = await insertEvent({
+        type: 'activity', externalId: `${p.surf_project_id}:${key}`, endpoint: 'search/events', projectId: p.id,
+        title: `${ACTIVITY_KIND_ZH[kind] || kind}：${it.title}`, summary: it.description || null,
+        linkMethod: 'surf_id', linkConfidence: 'high', eventAt, rawId,
+        data: { kind, source: 'activity_recheck', date: it.date },
+      })
+      if (id) st.events++
+      if (!latest || at > latest) latest = at
+    }
+    // 回查到的最新动态让「无信号天数」回到休眠线以内 → 本次评估会保持 / 恢复原阶段
+    if (latest && latest > prevSignal && (Date.now() - latest) / 86400000 < dormantDays) st.revived++
+    ctx.touched.add(p.id)
+  }
+}
+
 async function markDetailNotFound(projectId) {
   await db.query(
     `UPDATE wr_projects SET detail_fetched_at = now(), detail_not_found_at = now(),
@@ -561,6 +672,10 @@ async function refreshChainPriority() {
  * 1) 还没有链信息的项目，从项目简介里推断链（只算「待核实链」，不能直接进初筛）
  * 2) 最近一次有效信号：已关联、未被排除、非新闻的事件中，最晚被系统观察到的时间（没有则取首次发现时间）
  */
+// 信号时间：一般事件按系统观察到的时间；主动回查得到的项目动态按事件发生时间（不晚于观察时间），
+// 避免把很久以前的事件当成新信号
+const SIGNAL_TIME_SQL = `CASE WHEN e.endpoint = 'search/events' THEN LEAST(e.created_at, COALESCE(e.event_at, e.created_at)) ELSE e.created_at END`
+
 async function refreshSignals() {
   const rows = await db.query(
     `SELECT id, description FROM wr_projects
@@ -571,7 +686,7 @@ async function refreshSignals() {
   }
   await db.query(
     `UPDATE wr_projects p SET last_signal_at = GREATEST(p.first_seen_at, e.m)
-     FROM (SELECT p2.id, (SELECT max(e.created_at) FROM wr_events e
+     FROM (SELECT p2.id, (SELECT max(${SIGNAL_TIME_SQL}) FROM wr_events e
                           WHERE e.project_id = p2.id AND e.excluded_reason IS NULL AND e.event_type <> 'news') AS m
            FROM wr_projects p2 WHERE p2.merged_into IS NULL) e
      WHERE p.id = e.id AND p.last_signal_at IS DISTINCT FROM GREATEST(p.first_seen_at, e.m)`)
@@ -607,7 +722,8 @@ async function runDiscovery({ trigger = 'auto', dryRun = false } = {}) {
 
 const DISCOVERY_STEPS = [
   ['融资', collectFundraising], ['空投', collectAirdrops], ['上币', collectListings], ['新闻', collectNews],
-  ['身份补全', (ctx) => identityBackfill(ctx)], ['身份确认', enrichDetails], ['新闻关联', relinkNews],
+  ['身份补全', (ctx) => identityBackfill(ctx)], ['身份确认', enrichDetails],
+  ['休眠前回查', activityRecheck], ['详情刷新', refreshDetails], ['新闻关联', relinkNews],
 ]
 
 async function doRun(trigger) {
@@ -698,5 +814,5 @@ const isRunning = () => !!running
 module.exports = {
   runDiscovery, runIdentityBackfill, isRunning, DEFAULT_CONFIG, CORE_CHAINS, EXTRACTION_RULE_VERSION, LOCK_KEY,
   // 供自检使用的内部函数
-  _internal: { identityCandidates, identityBackfill, refreshSignals, resolveByName, matchByName, insertEvent, linkEvent, surf, detailCandidates, markDetailNotFound, nextWatermark },
+  _internal: { activityCandidates, activityRecheck, detailRefreshCandidates, refreshDetails, SIGNAL_TIME_SQL, identityCandidates, identityBackfill, refreshSignals, resolveByName, matchByName, insertEvent, linkEvent, surf, detailCandidates, markDetailNotFound, nextWatermark },
 }

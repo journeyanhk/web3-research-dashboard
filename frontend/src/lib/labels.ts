@@ -80,7 +80,7 @@ export const GROUP_LABEL: Record<string, string> = {
 }
 
 export const SOURCE_LABEL: Record<string, string> = {
-  fundraising: '融资', public_sale: '公募', airdrop: '空投', listing: '上币', news: '新闻', tge: 'TGE',
+  fundraising: '融资', public_sale: '公募', airdrop: '空投', listing: '上币', news: '新闻', tge: 'TGE', activity: '项目动态',
   selftest: '自检', project_detail: '项目详情',
 }
 export const IDENTITY_LABEL: Record<string, { text: string; cls: string; tip: string }> = {
