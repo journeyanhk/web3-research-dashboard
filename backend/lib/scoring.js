@@ -7,6 +7,10 @@ const registry = require('./registry')
 const pipeline = require('./pipeline')
 
 const SCORE_VERSION = 'm3.0-draft'
+// 「待确认链」：链未确认（没有行动分）的有效项目；质量分 ≥ 50 的进入人工待补链清单
+const NEEDS_CHAIN_SQL = `(p.action_score IS NULL AND COALESCE(p.chain_status,'none') = 'none' AND COALESCE(p.screening_facts->>'lead','false') <> 'true'
+  AND p.stage NOT IN ('listed_watch','non_early','opportunity_chain','dormant','archived'))`
+const NEEDS_CHAIN_LIST_MIN_QUALITY = 50
 const SCORING_RULE_VERSION = 'm3-scoring-1' // 1：链未确认 → 待确认链；阈值只比行动分；项目动态按发生时间计动能
 const SCORE_CONFIG_KEY = 'score_config'
 const SCORE_SNAPSHOT_TYPES = pipeline.SNAPSHOT_TYPES
@@ -438,19 +442,29 @@ async function scoreOverview() {
             count(*) FILTER (WHERE action_score IS NOT NULL AND listing_evidence_level = 'market_inferred')::int AS action_market_inferred,
             count(*) FILTER (WHERE chains ? 'robinhood')::int AS robinhood_scored,
             max(action_score) FILTER (WHERE chains ? 'robinhood')::float AS robinhood_max_action,
-            count(*) FILTER (WHERE action_score IS NULL AND COALESCE(chain_status,'none') = 'none' AND COALESCE(screening_facts->>'lead','false') <> 'true'
-                             AND stage NOT IN ('listed_watch','non_early','opportunity_chain','dormant','archived'))::int AS needs_chain,
-            count(*) FILTER (WHERE action_score IS NULL AND COALESCE(chain_status,'none') = 'none' AND COALESCE(screening_facts->>'lead','false') <> 'true'
-                             AND stage NOT IN ('listed_watch','non_early','opportunity_chain','dormant','archived') AND quality_score >= 50)::int AS needs_chain_q50,
+            count(*) FILTER (WHERE ${NEEDS_CHAIN_SQL})::int AS needs_chain,
+            count(*) FILTER (WHERE ${NEEDS_CHAIN_SQL} AND p.quality_score >= ${NEEDS_CHAIN_LIST_MIN_QUALITY})::int AS needs_chain_q50,
             max(scored_at) AS last_scored_at
-     FROM wr_projects WHERE merged_into IS NULL AND score_version IS NOT NULL`)
-  return rows[0] || {}
+     FROM wr_projects p WHERE merged_into IS NULL AND score_version IS NOT NULL`)
+  // 最新快照的规则版本 / 红线：发布环境如果还在跑旧代码，会用旧规则写快照（11-17 发现：旧规则让链未确认项目凭质量分进入深研 / 观察）
+  const latest = await db.one(
+    `WITH l AS (SELECT DISTINCT ON (s.project_id) s.scoring_rule_version, s.recommendation, s.created_at, p.chain_status
+                FROM wr_scores s JOIN wr_projects p ON p.id = s.project_id AND p.merged_into IS NULL
+                ORDER BY s.project_id, s.created_at DESC, s.id DESC)
+     SELECT count(*) FILTER (WHERE scoring_rule_version IS DISTINCT FROM $1)::int AS stale_rule,
+            array_remove(array_agg(DISTINCT scoring_rule_version) FILTER (WHERE scoring_rule_version IS DISTINCT FROM $1), NULL) AS stale_rule_versions,
+            count(*) FILTER (WHERE recommendation IN ('deep_research','watch') AND COALESCE(chain_status,'none') = 'none')::int AS rec_no_chain,
+            count(*) FILTER (WHERE recommendation = 'deep_research')::int AS rec_deep,
+            count(*) FILTER (WHERE recommendation = 'watch')::int AS rec_watch
+     FROM l`, [SCORING_RULE_VERSION])
+  return { ...(rows[0] || {}), ...latest, rule_version: SCORING_RULE_VERSION }
 }
 
 // 供前端 / 自检使用的默认阈值说明（数值本身不锁定）
 const SCORE_NOTE = '评分口径为草案：权重、阈值、折扣需观察 1–2 天真实数据后人工锁定；未锁定时不下「建议深研 / 关注」结论。'
 
 module.exports = {
+  NEEDS_CHAIN_SQL, NEEDS_CHAIN_LIST_MIN_QUALITY,
   SCORE_VERSION, SCORING_RULE_VERSION, SCORE_CONFIG_KEY, SCORE_SNAPSHOT_TYPES, SCORE_NOTE,
   DEFAULT_SCORE_CONFIG, DIM_LABEL, TGE_DIM_LABEL, GRADE_LABEL, FLAG_LABEL, RECOMMENDATION_LABEL,
   PROTECTED_KEYS, PROTECTED_LABEL, mergeConfig, loadScoreConfig, configHash, versionOf, diffCore, applyUnlock, applyConfigChange,

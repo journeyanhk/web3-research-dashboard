@@ -571,7 +571,7 @@ async function detailRefreshCandidates(limit, days) {
 // 优先回查「快要休眠」的项目，其次是已休眠项目（按质量分）。线索（仅名称）没有 Surf ID，不在范围内。
 async function activityCandidates(limit, idleDays, cooldownDays) {
   return db.query(
-    `SELECT id, name, surf_project_id, COALESCE(last_signal_at, first_seen_at) AS last_signal_at FROM wr_projects
+    `SELECT id, name, stage, surf_project_id, COALESCE(last_signal_at, first_seen_at) AS last_signal_at FROM wr_projects
      WHERE merged_into IS NULL AND surf_project_id IS NOT NULL
        AND stage IN ('discovered', 'pending_verify', 'data_incomplete', 'dormant')
        AND COALESCE(last_signal_at, first_seen_at) < now() - ($2 || ' days')::interval
@@ -588,7 +588,9 @@ async function activityCandidates(limit, idleDays, cooldownDays) {
  * - 项目动态只用于判断是否休眠和动能，不算融资 / 上币证据，不触发站内提醒，也不能把线索升级为正式项目
  */
 async function activityRecheck(ctx) {
-  const st = (ctx.stats.activity_recheck = { candidates: 0, checked: 0, events: 0, revived: 0, not_found: 0, errors: 0 })
+  // recent_found：查到休眠线以内的新动态；revived / kept_active 在本次阶段评估之后统计（见 runJob）
+  const st = (ctx.stats.activity_recheck = { candidates: 0, checked: 0, events: 0, recent_found: 0, revived: 0, kept_active: 0, not_found: 0, errors: 0 })
+  ctx.activityRecent = new Map()
   const { cfg } = ctx
   if (!cfg.activity_recheck_per_run) return
   const pcfg = await require('../pipeline').loadPipelineConfig()
@@ -636,8 +638,68 @@ async function activityRecheck(ctx) {
       if (!latest || at > latest) latest = at
     }
     // 回查到的最新动态让「无信号天数」回到休眠线以内 → 本次评估会保持 / 恢复原阶段
-    if (latest && latest > prevSignal && (Date.now() - latest) / 86400000 < dormantDays) st.revived++
+    if (latest && latest > prevSignal && (Date.now() - latest) / 86400000 < dormantDays) {
+      st.recent_found++
+      ctx.activityRecent.set(p.id, p.stage)
+    }
     ctx.touched.add(p.id)
+  }
+}
+
+// 发现近期动态 ≠ 阶段真的变化：评估后再看——原本休眠、现在不再休眠 / 归档 → revived；原本未休眠、仍未休眠 → kept_active
+async function countRecheckOutcome(ctx) {
+  const st = ctx.stats.activity_recheck
+  if (!st || !ctx.activityRecent?.size) return
+  const rows = await db.query('SELECT id, stage FROM wr_projects WHERE id = ANY($1)', [[...ctx.activityRecent.keys()]])
+  const INACTIVE = new Set(['dormant', 'archived'])
+  for (const r of rows) {
+    const before = ctx.activityRecent.get(r.id)
+    if (INACTIVE.has(r.stage)) continue
+    if (INACTIVE.has(before)) st.revived++
+    else st.kept_active++
+  }
+}
+
+// 例行维护概览（系统页用，不花点数）：队列、最近一次结果、本月点数、按近 7 天推算的月度点数
+const MAINT_TASKS = ['activity_recheck', 'detail_refresh']
+async function maintenanceOverview() {
+  const cfg = await loadConfig()
+  const usage = await db.query(
+    `SELECT task,
+       COALESCE(sum(actual_credits) FILTER (WHERE created_at >= date_trunc('month', now())), 0)::float AS credits_month,
+       count(*) FILTER (WHERE created_at >= date_trunc('month', now()))::int AS calls_month,
+       COALESCE(sum(actual_credits) FILTER (WHERE created_at >= now() - interval '7 days'), 0)::float AS credits_7d,
+       min(created_at) AS first_at
+     FROM wr_api_usage WHERE provider = 'surf' AND task = ANY($1) GROUP BY task`, [MAINT_TASKS])
+  const now = Date.now()
+  const tasks = Object.fromEntries(MAINT_TASKS.map((t) => {
+    const u = usage.find((x) => x.task === t)
+    if (!u) return [t, { credits_month: 0, calls_month: 0, credits_7d: 0, first_at: null, observed_days: 0, projected_month: null }]
+    // 观察天数：首次调用至今，最多 7 天；不足 1 天按 1 天算
+    const observed = Math.min(7, Math.max(1, (now - new Date(u.first_at).getTime()) / 86400000))
+    return [t, { ...u, observed_days: +observed.toFixed(1), projected_month: Math.round((u.credits_7d / observed) * 30) }]
+  }))
+  const q = await db.one(
+    `SELECT
+       count(*) FILTER (WHERE stage IN ('discovered','pending_verify','data_incomplete','dormant')
+         AND COALESCE(last_signal_at, first_seen_at) < now() - ($1 || ' days')::interval
+         AND (activity_checked_at IS NULL OR activity_checked_at < now() - ($2 || ' days')::interval))::int AS recheck_due,
+       count(*) FILTER (WHERE stage <> 'archived' AND detail_fetched_at IS NOT NULL AND detail_not_found_at IS NULL
+         AND detail_fetched_at < now() - ($3 || ' days')::interval)::int AS refresh_due,
+       count(*) FILTER (WHERE stage <> 'archived' AND detail_fetched_at IS NOT NULL AND detail_not_found_at IS NULL
+         AND detail_fetched_at < now() - (($3::int - 7) || ' days')::interval)::int AS refresh_due_7d
+     FROM wr_projects WHERE merged_into IS NULL AND surf_project_id IS NOT NULL`,
+    [String(cfg.activity_recheck_idle_days), String(cfg.activity_recheck_cooldown_days), String(cfg.detail_refresh_days)])
+  const lastRun = await db.one(
+    `SELECT id, started_at, stats->'activity_recheck' AS activity_recheck, stats->'detail_refresh' AS detail_refresh
+     FROM wr_job_runs WHERE job = 'discovery' AND stats ? 'activity_recheck' ORDER BY id DESC LIMIT 1`)
+  const firstAt = MAINT_TASKS.map((t) => tasks[t].first_at).filter(Boolean).map((d) => new Date(d).getTime())
+  return {
+    limits: { recheck_per_run: cfg.activity_recheck_per_run, refresh_per_run: cfg.detail_refresh_per_run,
+      idle_days: cfg.activity_recheck_idle_days, cooldown_days: cfg.activity_recheck_cooldown_days, refresh_days: cfg.detail_refresh_days },
+    tasks, queue: q, last_run: lastRun || null,
+    // 观察满一周后复核真实月度点数
+    review_after: firstAt.length ? new Date(Math.min(...firstAt) + 7 * 86400000).toISOString() : null,
   }
 }
 
@@ -760,10 +822,12 @@ async function runJob({ job, trigger, steps, cfgOverride = {} }) {
     ctx.stats.pipeline = { evaluated: ev.evaluated, changed: ev.changed.length,
       to_screening: ev.changed.filter((c) => c.to === 'screening').length }
   } catch (e) { ctx.errors.push(`阶段评估：${e.message}`) }
+  // 休眠前回查的实际效果：休眠项目恢复了几个、快休眠的项目保持活跃了几个
+  try { await countRecheckOutcome(ctx) } catch (e) { ctx.errors.push(`回查统计：${e.message}`) }
   // M3：按当前草案口径重新评分（只读数据库，不花点数；结果没变不会新增历史快照）
   try {
     const sc = await require('../scoring').scoreProjects()
-    ctx.stats.scoring = { scored: sc.scored, snapshots: sc.snapshots, version: sc.version, locked: sc.locked }
+    ctx.stats.scoring = { scored: sc.scored, snapshots: sc.snapshots, version: sc.version, rule_version: sc.rule_version, locked: sc.locked }
   } catch (e) { ctx.stats.scoring_failed = true; ctx.errors.push(`评分：${e.message}`) }
   const creditsAfter = await db.one(
     `SELECT COALESCE(sum(actual_credits),0)::float c FROM wr_api_usage WHERE provider = 'surf'`)
@@ -812,7 +876,7 @@ async function runIdentityBackfill({ limit = 30, trigger = 'manual', dryRun = fa
 const isRunning = () => !!running
 
 module.exports = {
-  runDiscovery, runIdentityBackfill, isRunning, DEFAULT_CONFIG, CORE_CHAINS, EXTRACTION_RULE_VERSION, LOCK_KEY,
+  runDiscovery, runIdentityBackfill, isRunning, maintenanceOverview, DEFAULT_CONFIG, CORE_CHAINS, EXTRACTION_RULE_VERSION, LOCK_KEY,
   // 供自检使用的内部函数
-  _internal: { activityCandidates, activityRecheck, detailRefreshCandidates, refreshDetails, SIGNAL_TIME_SQL, identityCandidates, identityBackfill, refreshSignals, resolveByName, matchByName, insertEvent, linkEvent, surf, detailCandidates, markDetailNotFound, nextWatermark },
+  _internal: { activityCandidates, activityRecheck, countRecheckOutcome, detailRefreshCandidates, refreshDetails, SIGNAL_TIME_SQL, identityCandidates, identityBackfill, refreshSignals, resolveByName, matchByName, insertEvent, linkEvent, surf, detailCandidates, markDetailNotFound, nextWatermark },
 }

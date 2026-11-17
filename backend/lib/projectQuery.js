@@ -34,6 +34,11 @@ function buildWhere(query, { includeStage }) {
   // M2.3 快捷入口：只差确认链 / 待验证重点
   if (gate === 'chain_missing') where.push(CHAIN_MISSING_SQL)
   if (gate === 'focus') where.push(`(p.screening_facts->>'focus') = 'true'`)
+  // M3.2：待确认链清单（质量分 ≥ 50、链未确认、没有行动分），人工确认链后进入行动池
+  if (gate === 'needs_chain') {
+    const { NEEDS_CHAIN_SQL, NEEDS_CHAIN_LIST_MIN_QUALITY } = require('./scoring')
+    where.push(`(${NEEDS_CHAIN_SQL} AND p.quality_score >= ${Number(NEEDS_CHAIN_LIST_MIN_QUALITY)})`)
+  }
   if (q && String(q).trim()) {
     addParam((p) => `(p.name ILIKE ${p} OR p.symbol ILIKE ${p} OR p.website_domain ILIKE ${p} OR p.twitter_handle ILIKE ${p})`,
       `%${String(q).trim().replace(/[%_\\]/g, (m) => `\\${m}`)}%`)

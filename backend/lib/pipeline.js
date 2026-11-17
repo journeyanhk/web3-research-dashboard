@@ -622,6 +622,8 @@ async function confirmChains(projectId, chains, note) {
     `INSERT INTO wr_stage_history (project_id, from_stage, to_stage, source, reason, operator, rule_version)
      VALUES ($1,$2,$3,'manual',$4,'self',$5)`,
     [projectId, p.stage, cur.stage, `人工确认所属链：${list.join(', ')}（${stageNote}）`, RULE_VERSION])
+  // 确认链后立即重评分（待确认链清单里的项目确认后马上进入行动评分，不用等每日采集）
+  await require('./scoring').scoreProjects([projectId], { snapshotType: 'manual_recalculate' })
   return r
 }
 

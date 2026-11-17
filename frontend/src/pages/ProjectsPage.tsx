@@ -54,6 +54,7 @@ function initialParam(name: string) {
 const GATES: [string, string, string][] = [
   ['chain_missing', '只差确认链', '证据已满足初筛，只因所属链未确认没进初筛；进详情页可一键确认链（不花点数）'],
   ['focus', '待验证重点', '有高质量融资和产品证据，但缺所属链信息'],
+  ['needs_chain', '待确认链清单', '质量分 ≥ 50、链未确认所以没有行动分的项目；进详情页人工确认链（不花点数），确认后自动进入行动评分'],
 ]
 interface PoolResponse {
   data: PoolRow[]

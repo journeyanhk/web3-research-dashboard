@@ -67,6 +67,7 @@ router.get('/overview', wrap(async (_req, res) => {
       pipeline_config: { ...require('../lib/pipeline').DEFAULT_PIPELINE_CONFIG, ...((await registry.getSetting('pipeline_config')) || {}) },
     },
     scoring: await require('../lib/scoring').scoreOverview(),
+    maintenance: await require('../lib/collect/discovery').maintenanceOverview(),
     counts: { open_alerts: openAlerts.c, projects: projects.c },
     last_selftest: lastSelftest,
   })

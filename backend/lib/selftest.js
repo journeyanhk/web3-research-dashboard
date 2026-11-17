@@ -501,6 +501,8 @@ async function boundaryTests(results) {
       assert(n.c === 1, '没有写备注')
       assert(h.c === 1, '没有写阶段历史')
       assert(sn.snapshot_type === 'manual_recalculate', `人工确认后的快照类型应为人工重算，实际 ${sn.snapshot_type}`)
+      const sc = await db.one(`SELECT count(*)::int c FROM wr_scores WHERE project_id = $1 AND snapshot_type = 'manual_recalculate'`, [p2])
+      assert(sc.c >= 1, '确认链后没有立即重评分')
       let threw = false
       try { await pipeline.confirmChains(p2, []) } catch { threw = true }
       assert(threw, '空链列表应被拒绝')
@@ -549,6 +551,7 @@ async function boundaryTests(results) {
     if (tmp.length) {
       await db.query('DELETE FROM wr_stage_history WHERE project_id = ANY($1)', [tmp])
       await db.query('DELETE FROM wr_screening_snapshots WHERE project_id = ANY($1)', [tmp])
+      await db.query('DELETE FROM wr_scores WHERE project_id = ANY($1)', [tmp])
       await db.query('DELETE FROM wr_notes WHERE project_id = ANY($1)', [tmp])
       await db.query('DELETE FROM wr_events WHERE external_id LIKE $1 OR project_id = ANY($2)', [`${tag}%`, tmp])
       await db.query('DELETE FROM wr_alerts WHERE project_id = ANY($1)', [tmp])
@@ -931,6 +934,24 @@ async function maintenanceTests(results) {
       return '31 天 → 候选；归档 → 跳过；Surf 查不到 → 跳过'
     })
 
+    await step(results, '维护', '回查效果分开统计：发现近期动态 ≠ 实际恢复', async () => {
+      const r2 = await db.one(
+        `INSERT INTO wr_projects (name, discovery_source, stage) VALUES ($1, 'selftest_tmp', 'pending_verify') RETURNING id`, [`WR自检回查B${tag}`])
+      tmp.push(r2.id)
+      await db.query(`UPDATE wr_projects SET stage = 'dormant' WHERE id = $1`, [pid])
+      const ctx = { stats: { activity_recheck: { recent_found: 2, revived: 0, kept_active: 0 } },
+        activityRecent: new Map([[pid, 'dormant'], [r2.id, 'pending_verify']]) }
+      await D.countRecheckOutcome(ctx)
+      const a = { ...ctx.stats.activity_recheck }
+      assert(a.revived === 0 && a.kept_active === 1, `仍在休眠的项目不应算恢复：${JSON.stringify(a)}`)
+      await db.query(`UPDATE wr_projects SET stage = 'pending_verify' WHERE id = $1`, [pid])
+      ctx.stats.activity_recheck = { recent_found: 2, revived: 0, kept_active: 0 }
+      await D.countRecheckOutcome(ctx)
+      const b = ctx.stats.activity_recheck
+      assert(b.revived === 1 && b.kept_active === 1, `休眠 → 恢复应计 1 个：${JSON.stringify(b)}`)
+      return `发现 2 个：仍休眠 → 恢复 0；休眠变待核验 → 恢复 1、保持活跃 1`
+    })
+
     await step(results, '维护', '例行维护不受单项目累计上限限制，但仍受月预算 / 每日上限约束', async () => {
       await db.query(`UPDATE wr_projects SET credits_spent = 3, coverage_level = 'discovery' WHERE id = $1`, [pid])
       const capped = await budget.check({ provider: 'surf', trigger: 'auto', projectId: pid, estCost: 1, silent: true })
@@ -940,9 +961,22 @@ async function maintenanceTests(results) {
       assert(/projectId: maintenance \? null : projectId/.test(src) && /!maintenance && result\.credits/.test(src), '例行维护调用没有绕开单项目上限')
       return `普通调用被单项目上限拦截；例行维护只看月 / 日预算（当前${maint.allowed ? '允许' : `拦截：${maint.reason}`}）`
     })
+    await step(results, '评分', '待确认链清单与评分红线：链未确认的项目不被建议深研 / 观察，最新评分都来自当前规则', async () => {
+      const scoring = require('./scoring')
+      const { listProjects } = require('./projectQuery')
+      const list = await listProjects({ gate: 'needs_chain', sort: 'score', limit: 200 })
+      assert(list.data.every((x) => x.action_score == null && (x.chain_status ?? 'none') === 'none' && Number(x.quality_score) >= scoring.NEEDS_CHAIN_LIST_MIN_QUALITY),
+        '待确认链清单里混入了有行动分 / 已有链 / 质量分 < 50 的项目')
+      const o = await scoring.scoreOverview()
+      assert(o.needs_chain_q50 === list.total, `清单 ${list.total} 个与系统页计数 ${o.needs_chain_q50} 不一致`)
+      assert(o.rec_no_chain === 0, `${o.rec_no_chain} 个链未确认的项目被建议深研 / 观察`)
+      assert(o.stale_rule === 0, `${o.stale_rule} 个项目的最新评分来自旧规则 ${(o.stale_rule_versions || []).join('、')}（发布环境可能还是旧版本）`)
+      return `待确认链清单 ${list.total} 个（${list.data.map((x) => x.name).join('、') || '无'}）；红线 0；规则版本 ${o.rule_version}`
+    })
   } finally {
     if (tmp.length) {
       await db.query('DELETE FROM wr_stage_history WHERE project_id = ANY($1)', [tmp])
+      await db.query('DELETE FROM wr_notes WHERE project_id = ANY($1)', [tmp])
       await db.query('DELETE FROM wr_screening_snapshots WHERE project_id = ANY($1)', [tmp])
       await db.query('DELETE FROM wr_scores WHERE project_id = ANY($1)', [tmp])
       await db.query('DELETE FROM wr_events WHERE external_id LIKE $1 OR project_id = ANY($2)', [`${tag}%`, tmp])

@@ -56,6 +56,17 @@ interface ScoreOverview {
   action_leads?: number; action_market_inferred?: number
   robinhood_scored?: number; robinhood_max_action?: number | null
   needs_chain?: number; needs_chain_q50?: number
+  stale_rule?: number; stale_rule_versions?: string[]; rec_no_chain?: number; rec_deep?: number; rec_watch?: number; rule_version?: string
+}
+interface MaintTask { credits_month: number; calls_month: number; credits_7d: number; first_at: string | null; observed_days: number; projected_month: number | null }
+interface RecheckStats { candidates?: number; checked?: number; events?: number; recent_found?: number; revived?: number; kept_active?: number; not_found?: number; errors?: number }
+interface RefreshStats { candidates?: number; fetched?: number; errors?: number }
+interface Maintenance {
+  limits: { recheck_per_run: number; refresh_per_run: number; idle_days: number; cooldown_days: number; refresh_days: number }
+  tasks: { activity_recheck: MaintTask; detail_refresh: MaintTask }
+  queue: { recheck_due: number; refresh_due: number; refresh_due_7d: number }
+  last_run: { id: number; started_at: string; activity_recheck?: RecheckStats | null; detail_refresh?: RefreshStats | null } | null
+  review_after: string | null
 }
 interface EndpointStat { provider: string; endpoint: string; calls: number; cached: number; ok: number; errors: number; est_credits: number; actual_credits: number }
 interface RelProject { id: number; name: string; symbol?: string | null; website_domain?: string | null; twitter_handle?: string | null; chains?: string[] | null }
@@ -70,6 +81,7 @@ interface Overview {
     score_config?: ScoreConfig
   }
   scoring?: ScoreOverview
+  maintenance?: Maintenance
   counts: { open_alerts: number; projects: number }
   last_selftest: Selftest | null
 }
@@ -116,6 +128,62 @@ const USAGE_STATUS: Record<string, { label: string; cls: string }> = {
 }
 const HELIUS_LEVEL: Record<string, string> = {
   normal: '正常', warn: '已过 70% 提示线', paused_nonessential: '≥85% 已暂停非必要任务', manual_only: '≥95% 仅手动', stopped: '已用完',
+}
+
+// 评分红线 / 规则版本守卫：发布环境如果还在运行旧代码，会用旧规则覆盖评分结果（11-17 发现）
+function ScoringGuard({ s }: { s: ScoreOverview }) {
+  const stale = s.stale_rule ?? 0
+  const bad = s.rec_no_chain ?? 0
+  if (!stale && !bad) return null
+  return (
+    <div className="border border-red-500/50 bg-red-500/10 rounded-lg px-5 py-3 text-sm">
+      <div className="font-semibold text-red-400">评分结果与当前规则不一致</div>
+      <ul className="mt-1 text-fg-subtle list-disc pl-5 space-y-0.5">
+        {stale > 0 && <li>{stale} 个项目的最新评分来自旧规则（{(s.stale_rule_versions ?? []).join('、') || '未知'}），当前规则 {s.rule_version}。通常是发布环境还在运行旧版本：请重新发布后再观察。</li>}
+        {bad > 0 && <li>{bad} 个链未确认的项目被建议「深研 / 观察」（红线，应为 0）。</li>}
+      </ul>
+    </div>
+  )
+}
+
+// M3.2 例行维护：休眠前回查 + 详情刷新的队列、最近结果和月度点数推算
+function MaintenancePanel({ m }: { m: Maintenance }) {
+  const ar = m.last_run?.activity_recheck
+  const dr = m.last_run?.detail_refresh
+  const t = m.tasks
+  const proj = (x: MaintTask) => (x.projected_month == null ? '—' : `${x.projected_month} 点 / 月`)
+  const projTotal = (t.activity_recheck.projected_month ?? 0) + (t.detail_refresh.projected_month ?? 0)
+  const reviewDue = m.review_after ? new Date(m.review_after).getTime() <= Date.now() : false
+  return (
+    <Section title="例行维护（休眠前回查 / 详情刷新）"
+      desc={`回查：${m.limits.idle_days} 天无信号的正式项目查一次 Surf 项目动态，每次最多 ${m.limits.recheck_per_run} 个，${m.limits.cooldown_days} 天冷却。刷新：详情超过 ${m.limits.refresh_days} 天的项目重新拉取，每次最多 ${m.limits.refresh_per_run} 个。维护调用不占单项目点数上限，仍计入月预算和每日上限。`}>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+        <div className="space-y-1">
+          <div className="text-xs text-fg-subtle">休眠前回查</div>
+          <div>待回查 <b>{m.queue.recheck_due}</b> 个（每天 {m.limits.recheck_per_run} 个，约 {Math.ceil(m.queue.recheck_due / Math.max(1, m.limits.recheck_per_run))} 天清完）</div>
+          <div>本月 {fmtNum(t.activity_recheck.credits_month, 0)} 点 / {t.activity_recheck.calls_month} 次 · 按近 {t.activity_recheck.observed_days || 0} 天推算 {proj(t.activity_recheck)}</div>
+          {ar ? (
+            <div className="text-fg-subtle">
+              最近一次（{fmtTime(m.last_run!.started_at)}）：查 {ar.checked ?? 0} 个，新动态 {ar.events ?? 0} 条；
+              发现近期动态 {ar.recent_found ?? 0} 个 → 实际恢复 {ar.revived ?? 0} 个、保持活跃 {ar.kept_active ?? 0} 个；查不到 {ar.not_found ?? 0}
+            </div>
+          ) : <div className="text-fg-subtle">每日采集还没有运行过回查（发布环境需更新到 M3.2）</div>}
+        </div>
+        <div className="space-y-1">
+          <div className="text-xs text-fg-subtle">详情刷新</div>
+          <div>已到期 <b>{m.queue.refresh_due}</b> 个，7 天内到期 {m.queue.refresh_due_7d} 个（每天 {m.limits.refresh_per_run} 个）</div>
+          <div>本月 {fmtNum(t.detail_refresh.credits_month, 0)} 点 / {t.detail_refresh.calls_month} 次 · 按近 {t.detail_refresh.observed_days || 0} 天推算 {proj(t.detail_refresh)}</div>
+          {dr && <div className="text-fg-subtle">最近一次：候选 {dr.candidates ?? 0}，刷新 {dr.fetched ?? 0}，失败 {dr.errors ?? 0}</div>}
+        </div>
+        <div className="md:col-span-2 text-xs text-fg-subtle border-t border-border-base pt-2">
+          维护合计推算 {projTotal ? `${projTotal} 点 / 月` : '—'}（初始回查队列清完前会偏高）。
+          {m.review_after && (reviewDue
+            ? <b className="text-yellow-400"> 已观察满一周，可以复核真实月度点数（尤其详情刷新）。</b>
+            : ` 观察满一周后（${fmtTime(m.review_after)}）复核真实月度点数。`)}
+        </div>
+      </div>
+    </Section>
+  )
 }
 
 function Section({ title, desc, children, right }: { title: string; desc?: string; children: React.ReactNode; right?: React.ReactNode }) {
@@ -443,7 +511,13 @@ function ScoreSettings({ setting, overview }: { setting: ScoreConfig; overview?:
           <span>有行动分 {overview.actionable} 个</span>
           <span title="行动分项目的链状态分布">已确认链 {overview.action_confirmed_chain ?? 0} · 推断链 {overview.action_inferred_chain ?? 0} · 无链 {overview.action_no_chain ?? 0}</span>
           <span title="必须为 0">线索 / 市场推断有行动分：{overview.action_leads ?? 0} / {overview.action_market_inferred ?? 0}</span>
-          <span title="链未确认、因此没有行动分的有效项目；确认链后才进入行动池">待确认链 {overview.needs_chain ?? 0}（质量分 ≥ 50：{overview.needs_chain_q50 ?? 0}）</span>
+          <span title="链未确认、因此没有行动分的有效项目；确认链后才进入行动池">
+            待确认链 {overview.needs_chain ?? 0}（质量分 ≥ 50：
+            <button className="underline underline-offset-2 hover:text-fg-base" onClick={() => { window.location.hash = '#/projects?gate=needs_chain&sort=score' }}>
+              {overview.needs_chain_q50 ?? 0} 个，打开清单
+            </button>）
+          </span>
+          <span title="当前口径下的建议数量">建议深研 {overview.rec_deep ?? 0} · 纳入观察 {overview.rec_watch ?? 0}</span>
           <span title="Robinhood 行动分上限 60">Robinhood 最高行动分 {overview.robinhood_max_action ?? '—'}</span>
           <span className="text-fg-subtle">最近评分 {overview.last_scored_at ? fmtTime(overview.last_scored_at) : '—'}</span>
         </div>
@@ -893,7 +967,9 @@ export default function SystemPage() {
       )}
       {data && (
         <>
+          {data.scoring && <ScoringGuard s={data.scoring} />}
           <BudgetPanel o={data} />
+          {data.maintenance && <MaintenancePanel m={data.maintenance} />}
           <ChainMatrix chains={data.chains} />
           <ProvidersTable providers={data.providers} />
           <EndpointStats rows={data.budget.byEndpoint ?? []} />
